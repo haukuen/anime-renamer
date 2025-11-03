@@ -2,6 +2,7 @@ use regex::Regex;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum EpisodeType {
     Normal,
     OVA,

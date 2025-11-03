@@ -263,13 +263,12 @@ async fn main() -> Result<()> {
         if input.trim().is_empty() || input.trim().eq_ignore_ascii_case("y") {
             let mut success = 0;
             for (old_path, new_path, _, _) in &rename_map {
-                if let Some(parent_dir) = new_path.parent() {
-                    if !parent_dir.exists() {
-                        if let Err(e) = std::fs::create_dir_all(parent_dir) {
-                            println!("创建目录失败: {} - {}", parent_dir.display(), e);
-                            continue;
-                        }
-                    }
+                if let Some(parent_dir) = new_path.parent()
+                    && !parent_dir.exists()
+                    && let Err(e) = std::fs::create_dir_all(parent_dir)
+                {
+                    println!("创建目录失败: {} - {}", parent_dir.display(), e);
+                    continue;
                 }
 
                 if let Err(e) = std::fs::rename(old_path, new_path) {
