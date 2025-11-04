@@ -202,7 +202,7 @@ impl Matcher for RomanSeasonMatcher {
             let before_ok = roman_match.start() == 0 || {
                 text.chars()
                     .nth(roman_match.start().saturating_sub(1))
-                    .map_or(false, |c| c.is_whitespace() || c == '[' || c == ']')
+                    .is_some_and(|c| c.is_whitespace() || c == '[' || c == ']')
             };
 
             if before_ok {

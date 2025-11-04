@@ -172,10 +172,8 @@ impl AniListClient {
 impl Media {
     #[allow(dead_code)]
     pub fn get_display_title(&self, prefer_english: bool) -> String {
-        if prefer_english {
-            if let Some(ref english) = self.title.english {
-                return english.clone();
-            }
+        if prefer_english && let Some(ref english) = self.title.english {
+            return english.clone();
         }
 
         if let Some(ref native) = self.title.native {
