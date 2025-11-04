@@ -6,7 +6,7 @@ mod tmdb;
 use anilist::AniListClient;
 use anyhow::{Context, Result};
 use clap::Parser as ClapParser;
-use parser::{EpisodeType, FileParser};
+use parser::{EpisodeType, FileParser, extract_tmdb_id};
 use scanner::FileScanner;
 use tmdb::TmdbClient;
 
@@ -224,6 +224,177 @@ async fn main() -> Result<()> {
     };
 
     println!("检测到番剧: {}", anime_name);
+
+    // 检查路径中是否包含 TMDB ID
+    let tmdb_id = extract_tmdb_id(&args.path);
+
+    if let Some(id) = tmdb_id {
+        println!("检测到 TMDB ID: {}, 直接使用该 ID 查询", id);
+        let client = TmdbClient::new();
+
+        let details = client
+            .get_tv_details(id, &args.language)
+            .await
+            .context("通过 ID 获取详情失败")?;
+
+        println!("找到匹配: {} (TMDB ID: {})", details.name, id);
+        println!("共 {} 季，开始分析集数映射...\n", details.number_of_seasons);
+
+        let normal_seasons: Vec<_> = details
+            .seasons
+            .iter()
+            .filter(|s| s.season_number > 0)
+            .cloned()
+            .collect();
+
+        let season_zero = details
+            .seasons
+            .iter()
+            .find(|s| s.season_number == 0)
+            .cloned();
+
+        let mut rename_map = Vec::new();
+        let mut special_counter = 1u32;
+
+        for (file_path, parsed) in &parsed_files {
+            let parent = file_path.parent().unwrap();
+
+            let (season, episode) = match parsed.episode_type {
+                EpisodeType::Normal => {
+                    // 如果文件名中有季度信息，直接使用
+                    if let Some(s) = parsed.season_number {
+                        (s, parsed.episode_number)
+                    } else {
+                        // 否则按连续集数映射
+                        match map_episode_to_season(parsed.episode_number, &normal_seasons) {
+                            Some((s, e)) => (s, e),
+                            None => {
+                                println!("无法映射第 {} 集到任何季", parsed.episode_number);
+                                continue;
+                            }
+                        }
+                    }
+                }
+                EpisodeType::OVA | EpisodeType::Special => {
+                    if season_zero.is_some() {
+                        (0, special_counter)
+                    } else {
+                        (0, parsed.episode_number)
+                    }
+                }
+                EpisodeType::Movie => {
+                    println!(
+                        "跳过剧场版: {}",
+                        file_path.file_name().unwrap().to_str().unwrap()
+                    );
+                    continue;
+                }
+                EpisodeType::OAD => {
+                    if season_zero.is_some() {
+                        (0, special_counter)
+                    } else {
+                        (0, parsed.episode_number)
+                    }
+                }
+            };
+
+            if parsed.episode_type != EpisodeType::Normal {
+                special_counter += 1;
+            }
+
+            let new_name = if args.keep_tags && !parsed.tags.is_empty() {
+                let tags_str = parsed
+                    .tags
+                    .iter()
+                    .map(|tag| format!("[{}]", tag))
+                    .collect::<Vec<_>>()
+                    .join("");
+                format!(
+                    "{} S{:02}E{:02}{}.{}",
+                    details.name, season, episode, tags_str, parsed.extension
+                )
+            } else {
+                format!(
+                    "{} S{:02}E{:02}.{}",
+                    details.name, season, episode, parsed.extension
+                )
+            };
+
+            let new_path = if args.season_folders {
+                let season_folder = if season == 0 {
+                    "Season 0".to_string()
+                } else {
+                    format!("Season {}", season)
+                };
+                parent.join(&season_folder).join(&new_name)
+            } else {
+                parent.join(&new_name)
+            };
+
+            rename_map.push((file_path.clone(), new_path, season, episode));
+        }
+
+        println!("重命名预览:\n");
+        for (i, (old_path, new_path, season, episode)) in rename_map.iter().enumerate() {
+            println!("[{}] S{:02}E{:02}", i + 1, season, episode);
+            println!(
+                "  原文件: {}",
+                old_path.file_name().unwrap().to_str().unwrap()
+            );
+
+            if args.season_folders {
+                if let Some(old_parent) = old_path.parent() {
+                    let relative_path = new_path.strip_prefix(old_parent).unwrap_or(new_path);
+                    println!("  新路径: {}\n", relative_path.display());
+                } else {
+                    println!(
+                        "  新文件: {}\n",
+                        new_path.file_name().unwrap().to_str().unwrap()
+                    );
+                }
+            } else {
+                println!(
+                    "  新文件: {}\n",
+                    new_path.file_name().unwrap().to_str().unwrap()
+                );
+            }
+        }
+
+        if args.dry_run {
+            println!("预览模式，未实际重命名");
+        } else {
+            print!("继续重命名？[Y/n] ");
+            use std::io::{self, Write};
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+
+            if input.trim().is_empty() || input.trim().eq_ignore_ascii_case("y") {
+                let mut success = 0;
+                for (old_path, new_path, _, _) in &rename_map {
+                    if let Some(parent_dir) = new_path.parent()
+                        && !parent_dir.exists()
+                        && let Err(e) = std::fs::create_dir_all(parent_dir)
+                    {
+                        println!("创建目录失败: {} - {}", parent_dir.display(), e);
+                        continue;
+                    }
+
+                    if let Err(e) = std::fs::rename(old_path, new_path) {
+                        println!("重命名失败: {} - {}", old_path.display(), e);
+                    } else {
+                        success += 1;
+                    }
+                }
+                println!("\n成功重命名 {} 个文件", success);
+            } else {
+                println!("已取消");
+            }
+        }
+
+        return Ok(());
+    }
 
     // 尝试 TMDB
     let client = TmdbClient::new();

@@ -472,3 +472,51 @@ impl Matcher for EMatcher {
         "E(E220)"
     }
 }
+
+pub fn extract_tmdb_id(path: &str) -> Option<u32> {
+    let regex = Regex::new(r"(?i)\[?tmdbid=(\d+)\]?").unwrap();
+    regex
+        .captures(path)
+        .and_then(|cap| cap.get(1)?.as_str().parse::<u32>().ok())
+}
+
+#[cfg(test)]
+mod tmdb_id_tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_tmdb_id_with_brackets() {
+        let path = "/path/to/[tmdbid=12345]/videos";
+        assert_eq!(extract_tmdb_id(path), Some(12345));
+    }
+
+    #[test]
+    fn test_extract_tmdb_id_without_brackets() {
+        let path = "/path/to/tmdbid=67890/videos";
+        assert_eq!(extract_tmdb_id(path), Some(67890));
+    }
+
+    #[test]
+    fn test_extract_tmdb_id_case_insensitive() {
+        let path = "/path/to/TMDBID=11111/videos";
+        assert_eq!(extract_tmdb_id(path), Some(11111));
+    }
+
+    #[test]
+    fn test_extract_tmdb_id_mixed_case() {
+        let path = "/path/to/[TmDbId=22222]/videos";
+        assert_eq!(extract_tmdb_id(path), Some(22222));
+    }
+
+    #[test]
+    fn test_extract_tmdb_id_not_found() {
+        let path = "/path/to/regular/folder";
+        assert_eq!(extract_tmdb_id(path), None);
+    }
+
+    #[test]
+    fn test_extract_tmdb_id_in_filename() {
+        let path = "/some/path/My Show [tmdbid=99999]";
+        assert_eq!(extract_tmdb_id(path), Some(99999));
+    }
+}

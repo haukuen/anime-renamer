@@ -1,5 +1,6 @@
 mod matchers;
 
+pub use matchers::extract_tmdb_id;
 use matchers::*;
 use regex::Regex;
 use std::path::Path;
