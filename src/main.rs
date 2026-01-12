@@ -43,6 +43,10 @@ struct Args {
     /// 使用 AniList API 而不是 TMDB（更好的罗马音支持）
     #[arg(long)]
     use_anilist: bool,
+
+    /// 手动指定季度（跳过自动映射）
+    #[arg(short, long)]
+    season: Option<u32>,
 }
 
 /// 根据总集数映射到季和集
@@ -194,8 +198,9 @@ fn handle_anilist_renaming(
     for (file_path, parsed) in parsed_files {
         let parent = file_path.parent().unwrap();
 
-        // AniList 模式必须依赖文件名中的季度信息
-        let season = parsed.season_number.unwrap_or(1);
+        let season = args
+            .season
+            .unwrap_or_else(|| parsed.season_number.unwrap_or(1));
         let episode = parsed.episode_number;
 
         let new_name = if args.keep_tags && !parsed.tags.is_empty() {
@@ -327,11 +332,11 @@ async fn main() -> Result<()> {
 
             let (season, episode) = match parsed.episode_type {
                 EpisodeType::Normal => {
-                    // 如果文件名中有季度信息，直接使用
-                    if let Some(s) = parsed.season_number {
+                    if let Some(s) = args.season {
+                        (s, parsed.episode_number)
+                    } else if let Some(s) = parsed.season_number {
                         (s, parsed.episode_number)
                     } else {
-                        // 否则按连续集数映射
                         match map_episode_to_season(parsed.episode_number, &normal_seasons) {
                             Some((s, e)) => (s, e),
                             None => {
@@ -530,11 +535,11 @@ async fn main() -> Result<()> {
 
         let (season, episode) = match parsed.episode_type {
             EpisodeType::Normal => {
-                // 如果文件名中有季度信息，直接使用
-                if let Some(s) = parsed.season_number {
+                if let Some(s) = args.season {
+                    (s, parsed.episode_number)
+                } else if let Some(s) = parsed.season_number {
                     (s, parsed.episode_number)
                 } else {
-                    // 否则按连续集数映射
                     match map_episode_to_season(parsed.episode_number, &normal_seasons) {
                         Some((s, e)) => (s, e),
                         None => {
