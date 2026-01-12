@@ -65,14 +65,130 @@ fn map_episode_to_season(episode_num: u32, seasons: &[tmdb::Season]) -> Option<(
     None
 }
 
+fn print_rename_preview(
+    rename_map: &[(std::path::PathBuf, std::path::PathBuf, u32, u32)],
+    season_folders: bool,
+) {
+    println!("重命名预览:\n");
+    for (i, (old_path, new_path, season, episode)) in rename_map.iter().enumerate() {
+        println!("[{}] S{:02}E{:02}", i + 1, season, episode);
+        println!(
+            "  原文件: {}",
+            old_path.file_name().unwrap().to_str().unwrap()
+        );
+
+        if season_folders {
+            if let Some(old_parent) = old_path.parent() {
+                let relative_path = new_path.strip_prefix(old_parent).unwrap_or(new_path);
+                println!("  新路径: {}", relative_path.display());
+            } else {
+                println!(
+                    "  新文件: {}",
+                    new_path.file_name().unwrap().to_str().unwrap()
+                );
+            }
+        } else {
+            println!(
+                "  新文件: {}",
+                new_path.file_name().unwrap().to_str().unwrap()
+            );
+        }
+
+        let subtitles = scanner::FileScanner::find_associated_subtitles(old_path);
+        if !subtitles.is_empty() {
+            let old_stem = old_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let suffixes: Vec<String> = subtitles
+                .iter()
+                .filter_map(|p| {
+                    let name = p.file_name()?.to_str()?;
+                    Some(name[old_stem.len()..].to_string())
+                })
+                .collect();
+            println!("  字幕: {}", suffixes.join(", "));
+        }
+        println!();
+    }
+}
+
+fn execute_rename(
+    rename_map: &[(std::path::PathBuf, std::path::PathBuf, u32, u32)],
+    dry_run: bool,
+) -> Result<()> {
+    use std::io::{self, Write};
+
+    if dry_run {
+        println!("预览模式，未实际重命名");
+        return Ok(());
+    }
+
+    print!("继续重命名？[Y/n] ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    if !input.trim().is_empty() && !input.trim().eq_ignore_ascii_case("y") {
+        println!("已取消");
+        return Ok(());
+    }
+
+    let mut video_success = 0;
+    let mut subtitle_success = 0;
+
+    for (old_path, new_path, _, _) in rename_map {
+        if let Some(parent_dir) = new_path.parent()
+            && !parent_dir.exists()
+            && let Err(e) = std::fs::create_dir_all(parent_dir)
+        {
+            println!("创建目录失败: {} - {}", parent_dir.display(), e);
+            continue;
+        }
+
+        let old_video_stem = old_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let subtitles = scanner::FileScanner::find_associated_subtitles(old_path);
+
+        if let Err(e) = std::fs::rename(old_path, new_path) {
+            println!("重命名失败: {} - {}", old_path.display(), e);
+            continue;
+        }
+        video_success += 1;
+
+        for subtitle_path in &subtitles {
+            if let Some(new_subtitle_path) = scanner::FileScanner::compute_subtitle_new_path(
+                subtitle_path,
+                old_video_stem,
+                new_path,
+            ) {
+                if let Err(e) = std::fs::rename(subtitle_path, &new_subtitle_path) {
+                    println!(
+                        "字幕重命名失败: {} - {}",
+                        subtitle_path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy(),
+                        e
+                    );
+                } else {
+                    subtitle_success += 1;
+                }
+            }
+        }
+    }
+
+    println!("\n成功重命名 {} 个视频文件", video_success);
+    if subtitle_success > 0 {
+        println!("成功重命名 {} 个字幕文件", subtitle_success);
+    }
+
+    Ok(())
+}
+
 /// 处理 AniList 模式的重命名（不依赖 TMDB 季度信息）
 fn handle_anilist_renaming(
     args: &Args,
     parsed_files: &[(std::path::PathBuf, parser::ParsedFile)],
     anime_name: &str,
 ) -> Result<()> {
-    use std::io::{self, Write};
-
     let mut rename_map = Vec::new();
 
     for (file_path, parsed) in parsed_files {
@@ -114,62 +230,12 @@ fn handle_anilist_renaming(
         rename_map.push((file_path.clone(), new_path, season, episode));
     }
 
-    println!("重命名预览:\n");
-    for (i, (old_path, new_path, season, episode)) in rename_map.iter().enumerate() {
-        println!("[{}] S{:02}E{:02}", i + 1, season, episode);
-        println!(
-            "  原文件: {}",
-            old_path.file_name().unwrap().to_str().unwrap()
-        );
-
-        if args.season_folders {
-            if let Some(old_parent) = old_path.parent() {
-                let relative_path = new_path.strip_prefix(old_parent).unwrap_or(new_path);
-                println!("  新路径: {}\n", relative_path.display());
-            } else {
-                println!(
-                    "  新文件: {}\n",
-                    new_path.file_name().unwrap().to_str().unwrap()
-                );
-            }
-        } else {
-            println!(
-                "  新文件: {}\n",
-                new_path.file_name().unwrap().to_str().unwrap()
-            );
-        }
-    }
+    print_rename_preview(&rename_map, args.season_folders);
 
     if args.dry_run {
         println!("预览模式，未实际重命名");
     } else {
-        print!("继续重命名？[Y/n] ");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-
-        if input.trim().is_empty() || input.trim().eq_ignore_ascii_case("y") {
-            let mut success = 0;
-            for (old_path, new_path, _, _) in &rename_map {
-                if let Some(parent_dir) = new_path.parent()
-                    && !parent_dir.exists()
-                    && let Err(e) = std::fs::create_dir_all(parent_dir)
-                {
-                    println!("创建目录失败: {} - {}", parent_dir.display(), e);
-                    continue;
-                }
-
-                if let Err(e) = std::fs::rename(old_path, new_path) {
-                    println!("重命名失败: {} - {}", old_path.display(), e);
-                } else {
-                    success += 1;
-                }
-            }
-            println!("\n成功重命名 {} 个文件", success);
-        } else {
-            println!("已取消");
-        }
+        execute_rename(&rename_map, args.dry_run)?;
     }
 
     Ok(())
@@ -334,63 +400,12 @@ async fn main() -> Result<()> {
             rename_map.push((file_path.clone(), new_path, season, episode));
         }
 
-        println!("重命名预览:\n");
-        for (i, (old_path, new_path, season, episode)) in rename_map.iter().enumerate() {
-            println!("[{}] S{:02}E{:02}", i + 1, season, episode);
-            println!(
-                "  原文件: {}",
-                old_path.file_name().unwrap().to_str().unwrap()
-            );
-
-            if args.season_folders {
-                if let Some(old_parent) = old_path.parent() {
-                    let relative_path = new_path.strip_prefix(old_parent).unwrap_or(new_path);
-                    println!("  新路径: {}\n", relative_path.display());
-                } else {
-                    println!(
-                        "  新文件: {}\n",
-                        new_path.file_name().unwrap().to_str().unwrap()
-                    );
-                }
-            } else {
-                println!(
-                    "  新文件: {}\n",
-                    new_path.file_name().unwrap().to_str().unwrap()
-                );
-            }
-        }
+        print_rename_preview(&rename_map, args.season_folders);
 
         if args.dry_run {
             println!("预览模式，未实际重命名");
         } else {
-            print!("继续重命名？[Y/n] ");
-            use std::io::{self, Write};
-            io::stdout().flush()?;
-
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-
-            if input.trim().is_empty() || input.trim().eq_ignore_ascii_case("y") {
-                let mut success = 0;
-                for (old_path, new_path, _, _) in &rename_map {
-                    if let Some(parent_dir) = new_path.parent()
-                        && !parent_dir.exists()
-                        && let Err(e) = std::fs::create_dir_all(parent_dir)
-                    {
-                        println!("创建目录失败: {} - {}", parent_dir.display(), e);
-                        continue;
-                    }
-
-                    if let Err(e) = std::fs::rename(old_path, new_path) {
-                        println!("重命名失败: {} - {}", old_path.display(), e);
-                    } else {
-                        success += 1;
-                    }
-                }
-                println!("\n成功重命名 {} 个文件", success);
-            } else {
-                println!("已取消");
-            }
+            execute_rename(&rename_map, args.dry_run)?;
         }
 
         return Ok(());
@@ -588,63 +603,12 @@ async fn main() -> Result<()> {
         rename_map.push((file_path.clone(), new_path, season, episode));
     }
 
-    println!("重命名预览:\n");
-    for (i, (old_path, new_path, season, episode)) in rename_map.iter().enumerate() {
-        println!("[{}] S{:02}E{:02}", i + 1, season, episode);
-        println!(
-            "  原文件: {}",
-            old_path.file_name().unwrap().to_str().unwrap()
-        );
-
-        if args.season_folders {
-            if let Some(old_parent) = old_path.parent() {
-                let relative_path = new_path.strip_prefix(old_parent).unwrap_or(new_path);
-                println!("  新路径: {}\n", relative_path.display());
-            } else {
-                println!(
-                    "  新文件: {}\n",
-                    new_path.file_name().unwrap().to_str().unwrap()
-                );
-            }
-        } else {
-            println!(
-                "  新文件: {}\n",
-                new_path.file_name().unwrap().to_str().unwrap()
-            );
-        }
-    }
+    print_rename_preview(&rename_map, args.season_folders);
 
     if args.dry_run {
         println!("预览模式，未实际重命名");
     } else {
-        print!("继续重命名？[Y/n] ");
-        use std::io::{self, Write};
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-
-        if input.trim().is_empty() || input.trim().eq_ignore_ascii_case("y") {
-            let mut success = 0;
-            for (old_path, new_path, _, _) in &rename_map {
-                if let Some(parent_dir) = new_path.parent()
-                    && !parent_dir.exists()
-                    && let Err(e) = std::fs::create_dir_all(parent_dir)
-                {
-                    println!("创建目录失败: {} - {}", parent_dir.display(), e);
-                    continue;
-                }
-
-                if let Err(e) = std::fs::rename(old_path, new_path) {
-                    println!("重命名失败: {} - {}", old_path.display(), e);
-                } else {
-                    success += 1;
-                }
-            }
-            println!("\n成功重命名 {} 个文件", success);
-        } else {
-            println!("已取消");
-        }
+        execute_rename(&rename_map, args.dry_run)?;
     }
 
     Ok(())
