@@ -47,6 +47,10 @@ struct Args {
     /// 手动指定季度（跳过自动映射）
     #[arg(short, long)]
     season: Option<u32>,
+
+    /// 集数偏移量
+    #[arg(short, long, default_value = "0", allow_hyphen_values = true)]
+    offset: i32,
 }
 
 /// 根据总集数映射到季和集
@@ -201,7 +205,7 @@ fn handle_anilist_renaming(
         let season = args
             .season
             .unwrap_or_else(|| parsed.season_number.unwrap_or(1));
-        let episode = parsed.episode_number;
+        let episode = (parsed.episode_number as i32 + args.offset).max(1) as u32;
 
         let new_name = if args.keep_tags && !parsed.tags.is_empty() {
             let tags_str = parsed
@@ -318,40 +322,31 @@ async fn main() -> Result<()> {
             .cloned()
             .collect();
 
-        let season_zero = details
-            .seasons
-            .iter()
-            .find(|s| s.season_number == 0)
-            .cloned();
-
         let mut rename_map = Vec::new();
-        let mut special_counter = 1u32;
 
         for (file_path, parsed) in &parsed_files {
             let parent = file_path.parent().unwrap();
 
             let (season, episode) = match parsed.episode_type {
                 EpisodeType::Normal => {
+                    let ep = (parsed.episode_number as i32 + args.offset).max(1) as u32;
                     if let Some(s) = args.season {
-                        (s, parsed.episode_number)
+                        (s, ep)
                     } else if let Some(s) = parsed.season_number {
-                        (s, parsed.episode_number)
+                        (s, ep)
                     } else {
-                        match map_episode_to_season(parsed.episode_number, &normal_seasons) {
+                        match map_episode_to_season(ep, &normal_seasons) {
                             Some((s, e)) => (s, e),
                             None => {
-                                println!("无法映射第 {} 集到任何季", parsed.episode_number);
+                                println!("无法映射第 {} 集到任何季", ep);
                                 continue;
                             }
                         }
                     }
                 }
-                EpisodeType::OVA | EpisodeType::Special => {
-                    if season_zero.is_some() {
-                        (0, special_counter)
-                    } else {
-                        (0, parsed.episode_number)
-                    }
+                EpisodeType::OVA | EpisodeType::Special | EpisodeType::OAD => {
+                    let ep = (parsed.episode_number as i32 + args.offset).max(1) as u32;
+                    (0, ep)
                 }
                 EpisodeType::Movie => {
                     println!(
@@ -360,18 +355,7 @@ async fn main() -> Result<()> {
                     );
                     continue;
                 }
-                EpisodeType::OAD => {
-                    if season_zero.is_some() {
-                        (0, special_counter)
-                    } else {
-                        (0, parsed.episode_number)
-                    }
-                }
             };
-
-            if parsed.episode_type != EpisodeType::Normal {
-                special_counter += 1;
-            }
 
             let new_name = if args.keep_tags && !parsed.tags.is_empty() {
                 let tags_str = parsed
@@ -521,40 +505,31 @@ async fn main() -> Result<()> {
         .cloned()
         .collect();
 
-    let season_zero = details
-        .seasons
-        .iter()
-        .find(|s| s.season_number == 0)
-        .cloned();
-
     let mut rename_map = Vec::new();
-    let mut special_counter = 1u32;
 
     for (file_path, parsed) in &parsed_files {
         let parent = file_path.parent().unwrap();
 
         let (season, episode) = match parsed.episode_type {
             EpisodeType::Normal => {
+                let ep = (parsed.episode_number as i32 + args.offset).max(1) as u32;
                 if let Some(s) = args.season {
-                    (s, parsed.episode_number)
+                    (s, ep)
                 } else if let Some(s) = parsed.season_number {
-                    (s, parsed.episode_number)
+                    (s, ep)
                 } else {
-                    match map_episode_to_season(parsed.episode_number, &normal_seasons) {
+                    match map_episode_to_season(ep, &normal_seasons) {
                         Some((s, e)) => (s, e),
                         None => {
-                            println!("无法映射第 {} 集到任何季", parsed.episode_number);
+                            println!("无法映射第 {} 集到任何季", ep);
                             continue;
                         }
                     }
                 }
             }
-            EpisodeType::OVA | EpisodeType::Special => {
-                if season_zero.is_some() {
-                    (0, special_counter)
-                } else {
-                    (0, parsed.episode_number)
-                }
+            EpisodeType::OVA | EpisodeType::Special | EpisodeType::OAD => {
+                let ep = (parsed.episode_number as i32 + args.offset).max(1) as u32;
+                (0, ep)
             }
             EpisodeType::Movie => {
                 println!(
@@ -563,18 +538,7 @@ async fn main() -> Result<()> {
                 );
                 continue;
             }
-            EpisodeType::OAD => {
-                if season_zero.is_some() {
-                    (0, special_counter)
-                } else {
-                    (0, parsed.episode_number)
-                }
-            }
         };
-
-        if parsed.episode_type != EpisodeType::Normal {
-            special_counter += 1;
-        }
 
         let new_name = if args.keep_tags && !parsed.tags.is_empty() {
             let tags_str = parsed
