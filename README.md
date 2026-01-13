@@ -38,6 +38,7 @@ anime_renamer [OPTIONS] <PATH>
 | `--use-anilist` | - | 使用 AniList API（更好的罗马音支持） | - |
 | `--season <N>` | `-s` | 手动指定季度（跳过自动映射） | - |
 | `--offset <N>` | `-o` | 集数偏移量（正数增加，负数减少） | `0` |
+| `--tmdb-id <ID>` | `-i` | 直接指定 TMDB ID | - |
 
 ### 常用示例
 
@@ -56,6 +57,10 @@ anime_renamer /path/to/anime/folder --keep-tags
 
 # 手动指定季度和集数偏移（适用于续作）
 anime_renamer /path/to/anime/folder --season 2 --offset -12
+
+# 直接指定 TMDB ID
+anime_renamer /path/to/anime/folder --tmdb-id 12345
+anime_renamer /path/to/anime/folder -i 12345 --season 2 --offset -12
 
 # 使用 AniList 并指定罗马音名称
 anime_renamer /path/to/anime/folder --use-anilist
@@ -82,7 +87,10 @@ anime_renamer /path/to/anime/folder --season-folders
 
 ## TMDB ID 支持
 
-如果文件夹名包含 `[tmdbid=12345]` 格式，将直接使用该 ID 查询，跳过搜索步骤。
+可通过以下方式指定 TMDB ID，跳过搜索步骤：
+
+1. **命令行参数**：`--tmdb-id 12345` 或 `-i 12345`
+2. **文件夹名**：包含 `[tmdbid=12345]` 格式
 
 ## 支持的格式
 
@@ -90,6 +98,3 @@ anime_renamer /path/to/anime/folder --season-folders
 
 **字幕：** ass, srt, ssa, sub, idx, vtt
 
-## 许可证
-
-MIT

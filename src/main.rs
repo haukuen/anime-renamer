@@ -51,6 +51,10 @@ struct Args {
     /// 集数偏移量
     #[arg(short, long, default_value = "0", allow_hyphen_values = true)]
     offset: i32,
+
+    /// 直接指定 TMDB ID
+    #[arg(short = 'i', long)]
+    tmdb_id: Option<u32>,
 }
 
 fn apply_offset(episode: u32, offset: i32) -> u32 {
@@ -331,11 +335,10 @@ async fn main() -> Result<()> {
 
     println!("检测到番剧: {}", anime_name);
 
-    // 检查路径中是否包含 TMDB ID
-    let tmdb_id = extract_tmdb_id(&args.path);
+    let tmdb_id = args.tmdb_id.or_else(|| extract_tmdb_id(&args.path));
 
     if let Some(id) = tmdb_id {
-        println!("检测到 TMDB ID: {}, 直接使用该 ID 查询", id);
+        println!("使用 TMDB ID: {}", id);
         let client = TmdbClient::new();
 
         let details = client
