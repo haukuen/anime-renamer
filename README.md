@@ -65,6 +65,9 @@ anime_renamer /path/to/anime/folder -i 12345 --season 2 --offset -12
 # 使用 AniList 并指定罗马音名称
 anime_renamer /path/to/anime/folder --use-anilist
 
+# 使用自定义 TMDB API 配置
+TMDB_API_KEY=your_api_key TMDB_BASE_URL=https://your-tmdb-proxy.example.com anime_renamer /path/to/anime/folder
+
 # 为每季创建单独文件夹
 anime_renamer /path/to/anime/folder --season-folders
 ```
@@ -92,9 +95,17 @@ anime_renamer /path/to/anime/folder --season-folders
 1. **命令行参数**：`--tmdb-id 12345` 或 `-i 12345`
 2. **文件夹名**：包含 `[tmdbid=12345]` 格式
 
+## TMDB 自定义配置
+
+可通过环境变量覆盖默认 TMDB 配置：
+
+- `TMDB_API_KEY`：自定义 TMDB API Key
+- `TMDB_BASE_URL`：自定义 TMDB API Base URL（例如代理或镜像地址，不需要包含 `/3` 版本路径）
+
+未设置时会继续使用程序内置默认值。为了兼容旧配置，如果环境变量里已经带了 `/3`，程序会自动去掉它再拼接版本路径。
+
 ## 支持的格式
 
 **视频：** mkv, mp4, avi, flv, rmvb, mov
 
 **字幕：** ass, srt, ssa, sub, idx, vtt
-

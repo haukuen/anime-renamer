@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::env;
 
-const API_KEY: &str = "454dec4903d35bb318ab2ad9e578c615";
-const BASE_URL: &str = "https://api.themoviedb.org/3";
+const DEFAULT_API_KEY: &str = "454dec4903d35bb318ab2ad9e578c615";
+const DEFAULT_BASE_URL: &str = "https://api.themoviedb.org";
+const API_VERSION_PATH: &str = "/3";
 
 #[derive(Debug, Deserialize)]
 pub struct SearchResult {
@@ -54,23 +56,27 @@ pub struct Episode {
 
 pub struct TmdbClient {
     client: reqwest::Client,
+    api_key: String,
+    base_url: String,
 }
 
 impl TmdbClient {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
+            api_key: resolve_api_key(),
+            base_url: resolve_base_url(),
         }
     }
 
     pub async fn search_tv(&self, query: &str, language: &str) -> Result<Vec<TvShow>> {
-        let url = format!("{}/search/tv", BASE_URL);
+        let url = self.build_url("/search/tv");
 
         let response = self
             .client
             .get(&url)
             .query(&[
-                ("api_key", API_KEY),
+                ("api_key", self.api_key.as_str()),
                 ("query", query),
                 ("language", language),
             ])
@@ -87,12 +93,12 @@ impl TmdbClient {
     }
 
     pub async fn get_tv_details(&self, tv_id: u32, language: &str) -> Result<TvDetails> {
-        let url = format!("{}/tv/{}", BASE_URL, tv_id);
+        let url = self.build_url(&format!("/tv/{}", tv_id));
 
         let response = self
             .client
             .get(&url)
-            .query(&[("api_key", API_KEY), ("language", language)])
+            .query(&[("api_key", self.api_key.as_str()), ("language", language)])
             .send()
             .await
             .context("Failed to send tv details request")?;
@@ -112,12 +118,12 @@ impl TmdbClient {
         season_number: u32,
         language: &str,
     ) -> Result<SeasonDetails> {
-        let url = format!("{}/tv/{}/season/{}", BASE_URL, tv_id, season_number);
+        let url = self.build_url(&format!("/tv/{}/season/{}", tv_id, season_number));
 
         let response = self
             .client
             .get(&url)
-            .query(&[("api_key", API_KEY), ("language", language)])
+            .query(&[("api_key", self.api_key.as_str()), ("language", language)])
             .send()
             .await
             .context("Failed to send season details request")?;
@@ -128,5 +134,75 @@ impl TmdbClient {
             .context("Failed to parse season details response")?;
 
         Ok(season)
+    }
+
+    fn build_url(&self, path: &str) -> String {
+        format!("{}{}{}", self.base_url, API_VERSION_PATH, path)
+    }
+}
+
+fn resolve_api_key() -> String {
+    resolve_api_key_from_env(env::var("TMDB_API_KEY").ok())
+}
+
+fn resolve_base_url() -> String {
+    resolve_base_url_from_env(env::var("TMDB_BASE_URL").ok())
+}
+
+fn resolve_api_key_from_env(value: Option<String>) -> String {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_API_KEY.to_string())
+}
+
+fn resolve_base_url_from_env(value: Option<String>) -> String {
+    let normalized = value
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+
+    normalized
+        .strip_suffix(API_VERSION_PATH)
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_api_key_falls_back_to_default() {
+        assert_eq!(resolve_api_key_from_env(None), DEFAULT_API_KEY);
+    }
+
+    #[test]
+    fn test_resolve_api_key_prefers_env_value() {
+        assert_eq!(
+            resolve_api_key_from_env(Some(" custom-key ".to_string())),
+            "custom-key"
+        );
+    }
+
+    #[test]
+    fn test_resolve_base_url_falls_back_to_default() {
+        assert_eq!(resolve_base_url_from_env(None), DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn test_resolve_base_url_trims_trailing_slash() {
+        assert_eq!(
+            resolve_base_url_from_env(Some(" https://example.com/api/ ".to_string())),
+            "https://example.com/api"
+        );
+    }
+
+    #[test]
+    fn test_resolve_base_url_strips_version_suffix() {
+        assert_eq!(
+            resolve_base_url_from_env(Some("https://example.com/api/3".to_string())),
+            "https://example.com/api"
+        );
     }
 }
