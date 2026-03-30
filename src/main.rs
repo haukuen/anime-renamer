@@ -7,13 +7,13 @@ mod tmdb;
 use anilist::AniListClient;
 use anyhow::{Context, Result, bail};
 use clap::Parser as ClapParser;
-use nfo::{EpisodeNfo, NfoWriter, Rating, TvShowNfo, UniqueId, WriteAction};
+use nfo::{ActorNfo, EpisodeNfo, NfoWriter, PersonNfo, Rating, TvShowNfo, UniqueId, WriteAction};
 use parser::{EpisodeType, FileParser, ParsedFile, extract_tmdb_id};
 use scanner::FileScanner;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use tmdb::{Episode, TmdbClient, TvDetails};
+use tmdb::{Episode, EpisodeCredits, EpisodeExternalIds, TmdbClient, TvDetails};
 
 type ParsedEntry = (PathBuf, ParsedFile);
 type RenameEntry = (PathBuf, PathBuf, u32, u32);
@@ -655,6 +655,40 @@ fn required_seasons_for_nfo(parsed_files: &[ParsedEntry]) -> BTreeSet<u32> {
         .collect()
 }
 
+fn season_image_targets(parsed_files: &[ParsedEntry]) -> HashMap<u32, Vec<PathBuf>> {
+    let mut seasons_by_dir: HashMap<PathBuf, BTreeSet<u32>> = HashMap::new();
+
+    for (video_path, parsed) in parsed_files {
+        let Some(season) = parsed.season_number else {
+            continue;
+        };
+        let Some(parent) = video_path.parent() else {
+            continue;
+        };
+
+        seasons_by_dir
+            .entry(parent.to_path_buf())
+            .or_default()
+            .insert(season);
+    }
+
+    let mut targets = HashMap::new();
+
+    for (dir, seasons) in seasons_by_dir {
+        if seasons.len() != 1 {
+            continue;
+        }
+
+        let season = *seasons
+            .iter()
+            .next()
+            .expect("single season set is non-empty");
+        targets.entry(season).or_insert_with(Vec::new).push(dir);
+    }
+
+    targets
+}
+
 async fn fetch_episode_lookup(
     client: &TmdbClient,
     tv_id: u32,
@@ -675,6 +709,13 @@ async fn fetch_episode_lookup(
     }
 
     Ok(episodes)
+}
+
+fn record_write_action(action: WriteAction, written: &mut usize, skipped_existing: &mut usize) {
+    match action {
+        WriteAction::WouldWrite | WriteAction::Written => *written += 1,
+        WriteAction::SkippedExisting => *skipped_existing += 1,
+    }
 }
 
 fn build_rating(value: f64, votes: u32) -> Option<Rating> {
@@ -702,6 +743,119 @@ fn collect_studios(details: &TvDetails) -> Vec<String> {
     };
 
     source.iter().map(|item| item.name.clone()).collect()
+}
+
+fn build_episode_unique_ids(
+    episode: &Episode,
+    external_ids: Option<&EpisodeExternalIds>,
+) -> Vec<UniqueId> {
+    let imdb_id = external_ids
+        .and_then(|ids| ids.imdb_id.clone())
+        .filter(|value| !value.trim().is_empty());
+    let tvdb_id = external_ids.and_then(|ids| ids.tvdb_id);
+
+    let mut unique_ids = vec![UniqueId {
+        id_type: "tmdb".to_string(),
+        value: episode.id.to_string(),
+        is_default: imdb_id.is_none(),
+    }];
+
+    if let Some(imdb_id) = imdb_id {
+        unique_ids.push(UniqueId {
+            id_type: "imdb".to_string(),
+            value: imdb_id,
+            is_default: true,
+        });
+    }
+
+    if let Some(tvdb_id) = tvdb_id {
+        unique_ids.push(UniqueId {
+            id_type: "tvdb".to_string(),
+            value: tvdb_id.to_string(),
+            is_default: false,
+        });
+    }
+
+    unique_ids
+}
+
+fn build_episode_credits(credits: Option<&EpisodeCredits>) -> Vec<PersonNfo> {
+    let Some(credits) = credits else {
+        return Vec::new();
+    };
+
+    let mut seen = HashSet::new();
+    let mut people = Vec::new();
+
+    for crew in &credits.crew {
+        let is_writing = crew.department.as_deref() == Some("Writing");
+        if !is_writing || !seen.insert(crew.id) {
+            continue;
+        }
+
+        people.push(PersonNfo {
+            name: crew.name.clone(),
+            tmdb_id: Some(crew.id),
+        });
+    }
+
+    people
+}
+
+fn build_episode_directors(credits: Option<&EpisodeCredits>) -> Vec<PersonNfo> {
+    let Some(credits) = credits else {
+        return Vec::new();
+    };
+
+    let mut seen = HashSet::new();
+    let mut people = Vec::new();
+
+    for crew in &credits.crew {
+        if crew.job.as_deref() != Some("Director") || !seen.insert(crew.id) {
+            continue;
+        }
+
+        people.push(PersonNfo {
+            name: crew.name.clone(),
+            tmdb_id: Some(crew.id),
+        });
+    }
+
+    people
+}
+
+fn build_episode_actors(credits: Option<&EpisodeCredits>) -> Vec<ActorNfo> {
+    let Some(credits) = credits else {
+        return Vec::new();
+    };
+
+    let mut actors = Vec::new();
+
+    for cast in &credits.cast {
+        actors.push(ActorNfo {
+            name: cast.name.clone(),
+            role: cast
+                .character
+                .clone()
+                .filter(|value| !value.trim().is_empty()),
+            tmdb_id: Some(cast.id),
+            actor_type: None,
+        });
+    }
+
+    for guest_star in &credits.guest_stars {
+        actors.push(ActorNfo {
+            name: guest_star.name.clone(),
+            role: guest_star
+                .character
+                .clone()
+                .filter(|value| !value.trim().is_empty()),
+            tmdb_id: Some(guest_star.id),
+            actor_type: Some("GuestStar".to_string()),
+        });
+    }
+
+    actors
 }
 
 fn build_tvshow_nfo(details: &TvDetails) -> TvShowNfo {
@@ -739,6 +893,8 @@ fn build_episode_nfo(
     season_number: u32,
     episode_number: u32,
     episode: &Episode,
+    external_ids: Option<&EpisodeExternalIds>,
+    credits: Option<&EpisodeCredits>,
 ) -> EpisodeNfo {
     EpisodeNfo {
         title: episode.name.clone(),
@@ -749,13 +905,13 @@ fn build_episode_nfo(
             .overview
             .clone()
             .filter(|value| !value.trim().is_empty()),
+        premiered: episode.air_date.clone(),
         aired: episode.air_date.clone(),
         rating: build_rating(episode.vote_average, episode.vote_count),
-        unique_ids: vec![UniqueId {
-            id_type: "tmdb".to_string(),
-            value: episode.id.to_string(),
-            is_default: true,
-        }],
+        unique_ids: build_episode_unique_ids(episode, external_ids),
+        credits: build_episode_credits(credits),
+        directors: build_episode_directors(credits),
+        actors: build_episode_actors(credits),
     }
 }
 
@@ -807,20 +963,112 @@ async fn handle_nfo_export(args: &NfoArgs) -> Result<()> {
 
     let seasons = required_seasons_for_nfo(&parsed_files);
     let episode_lookup = fetch_episode_lookup(&client, show_id, &seasons, &args.language).await?;
+    let season_targets = season_image_targets(&parsed_files);
     let writer = NfoWriter::new(args.dry_run, args.force);
 
     let tvshow_outcome = writer.write_tvshow(Path::new(&args.path), &build_tvshow_nfo(&details))?;
     print_nfo_outcome(&tvshow_outcome.path, tvshow_outcome.action);
 
-    let mut written = 0;
-    let mut skipped_existing = usize::from(tvshow_outcome.action == WriteAction::SkippedExisting);
-    let mut missing_metadata = 0;
-
-    if matches!(
+    let mut nfo_written = 0;
+    let mut nfo_skipped_existing = 0;
+    record_write_action(
         tvshow_outcome.action,
-        WriteAction::Written | WriteAction::WouldWrite
-    ) {
-        written += 1;
+        &mut nfo_written,
+        &mut nfo_skipped_existing,
+    );
+
+    let mut image_written = 0;
+    let mut image_skipped_existing = 0;
+    let mut missing_images = 0;
+    let mut image_failures = 0;
+    let mut missing_metadata = 0;
+    let mut metadata_enrichment_failures = 0;
+
+    if let Some(poster_path) = details.poster_path.as_deref() {
+        match client.download_image(poster_path).await {
+            Ok(bytes) => {
+                let outcome = writer.write_tvshow_primary_image(
+                    Path::new(&args.path),
+                    tmdb::image_extension(poster_path),
+                    &bytes,
+                )?;
+                print_nfo_outcome(&outcome.path, outcome.action);
+                record_write_action(
+                    outcome.action,
+                    &mut image_written,
+                    &mut image_skipped_existing,
+                );
+            }
+            Err(error) => {
+                println!("跳过剧集海报下载失败: {error}");
+                image_failures += 1;
+            }
+        }
+    } else {
+        missing_images += 1;
+    }
+
+    if let Some(backdrop_path) = details.backdrop_path.as_deref() {
+        match client.download_image(backdrop_path).await {
+            Ok(bytes) => {
+                let outcome = writer.write_tvshow_backdrop_image(
+                    Path::new(&args.path),
+                    tmdb::image_extension(backdrop_path),
+                    &bytes,
+                )?;
+                print_nfo_outcome(&outcome.path, outcome.action);
+                record_write_action(
+                    outcome.action,
+                    &mut image_written,
+                    &mut image_skipped_existing,
+                );
+            }
+            Err(error) => {
+                println!("跳过剧集背景图下载失败: {error}");
+                image_failures += 1;
+            }
+        }
+    } else {
+        missing_images += 1;
+    }
+
+    for season in &seasons {
+        let Some(target_dirs) = season_targets.get(season) else {
+            continue;
+        };
+        let Some(season_info) = details
+            .seasons
+            .iter()
+            .find(|item| item.season_number == *season)
+        else {
+            continue;
+        };
+        let Some(poster_path) = season_info.poster_path.as_deref() else {
+            missing_images += target_dirs.len();
+            continue;
+        };
+
+        match client.download_image(poster_path).await {
+            Ok(bytes) => {
+                for target_dir in target_dirs {
+                    let outcome = writer.write_season_primary_image(
+                        target_dir,
+                        tmdb::image_extension(poster_path),
+                        &bytes,
+                    )?;
+                    print_nfo_outcome(&outcome.path, outcome.action);
+                    record_write_action(
+                        outcome.action,
+                        &mut image_written,
+                        &mut image_skipped_existing,
+                    );
+                }
+            }
+            Err(error) => {
+                println!("跳过第 {} 季海报下载失败: {error}", season);
+                image_failures += target_dirs.len();
+            }
+        }
     }
 
     for (video_path, parsed) in &parsed_files {
@@ -836,23 +1084,95 @@ async fn handle_nfo_export(args: &NfoArgs) -> Result<()> {
             continue;
         };
 
-        let episode_nfo = build_episode_nfo(&details.name, season, parsed.episode_number, episode);
+        let (external_ids_result, credits_result) = tokio::join!(
+            client.get_episode_external_ids(show_id, season, parsed.episode_number),
+            client.get_episode_credits(show_id, season, parsed.episode_number, &args.language)
+        );
+
+        let external_ids = match external_ids_result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                println!(
+                    "跳过单集外部 ID 增强: {} ({error})",
+                    video_path.file_name().unwrap().to_string_lossy()
+                );
+                metadata_enrichment_failures += 1;
+                None
+            }
+        };
+
+        let credits = match credits_result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                println!(
+                    "跳过单集演职员增强: {} ({error})",
+                    video_path.file_name().unwrap().to_string_lossy()
+                );
+                metadata_enrichment_failures += 1;
+                None
+            }
+        };
+
+        let episode_nfo = build_episode_nfo(
+            &details.name,
+            season,
+            parsed.episode_number,
+            episode,
+            external_ids.as_ref(),
+            credits.as_ref(),
+        );
         let outcome = writer.write_episode(video_path, &episode_nfo)?;
         print_nfo_outcome(&outcome.path, outcome.action);
+        record_write_action(outcome.action, &mut nfo_written, &mut nfo_skipped_existing);
 
-        match outcome.action {
-            WriteAction::WouldWrite | WriteAction::Written => written += 1,
-            WriteAction::SkippedExisting => skipped_existing += 1,
+        if let Some(still_path) = episode.still_path.as_deref() {
+            match client.download_image(still_path).await {
+                Ok(bytes) => {
+                    let outcome = writer.write_episode_thumb_image(
+                        video_path,
+                        tmdb::image_extension(still_path),
+                        &bytes,
+                    )?;
+                    print_nfo_outcome(&outcome.path, outcome.action);
+                    record_write_action(
+                        outcome.action,
+                        &mut image_written,
+                        &mut image_skipped_existing,
+                    );
+                }
+                Err(error) => {
+                    println!(
+                        "跳过单集缩略图下载失败: {} ({error})",
+                        video_path.file_name().unwrap().to_string_lossy()
+                    );
+                    image_failures += 1;
+                }
+            }
+        } else {
+            missing_images += 1;
         }
     }
 
     println!("\nNFO 导出摘要:");
-    println!("  计划/成功写入: {}", written);
-    if skipped_existing > 0 {
-        println!("  已跳过已有文件: {}", skipped_existing);
+    println!("  NFO 计划/成功写入: {}", nfo_written);
+    if nfo_skipped_existing > 0 {
+        println!("  NFO 已跳过已有文件: {}", nfo_skipped_existing);
+    }
+    println!("  图片计划/成功写入: {}", image_written);
+    if image_skipped_existing > 0 {
+        println!("  图片已跳过已有文件: {}", image_skipped_existing);
     }
     if missing_metadata > 0 {
         println!("  缺少剧集元数据: {}", missing_metadata);
+    }
+    if missing_images > 0 {
+        println!("  缺少图片源数据: {}", missing_images);
+    }
+    if image_failures > 0 {
+        println!("  图片下载失败: {}", image_failures);
+    }
+    if metadata_enrichment_failures > 0 {
+        println!("  单集增强信息获取失败: {}", metadata_enrichment_failures);
     }
     if args.dry_run {
         println!("  当前为预览模式，未实际写入文件");
@@ -920,6 +1240,7 @@ mod tests {
             season_number,
             episode_count,
             name: format!("Season {}", season_number),
+            poster_path: None,
         }
     }
 
@@ -928,6 +1249,8 @@ mod tests {
             id: 123,
             name: "Show".to_string(),
             original_name: "Show".to_string(),
+            poster_path: None,
+            backdrop_path: None,
             overview: Some("Overview".to_string()),
             first_air_date: Some("2024-01-01".to_string()),
             status: Some("Ended".to_string()),
@@ -1062,19 +1385,63 @@ mod tests {
             id: 999,
             episode_number: 3,
             name: "Episode 3".to_string(),
+            still_path: Some("/still.jpg".to_string()),
             air_date: Some("2024-01-15".to_string()),
             overview: Some("Overview".to_string()),
             vote_average: 7.8,
             vote_count: 11,
         };
+        let external_ids = EpisodeExternalIds {
+            imdb_id: Some("tt1234567".to_string()),
+            tvdb_id: Some(42),
+        };
+        let credits = EpisodeCredits {
+            cast: vec![tmdb::CastMember {
+                id: 1,
+                name: "Actor".to_string(),
+                character: Some("Hero".to_string()),
+                profile_path: None,
+            }],
+            crew: vec![
+                tmdb::CrewMember {
+                    id: 2,
+                    name: "Writer".to_string(),
+                    department: Some("Writing".to_string()),
+                    job: Some("Writer".to_string()),
+                    profile_path: None,
+                },
+                tmdb::CrewMember {
+                    id: 3,
+                    name: "Director".to_string(),
+                    department: Some("Directing".to_string()),
+                    job: Some("Director".to_string()),
+                    profile_path: None,
+                },
+            ],
+            guest_stars: vec![tmdb::CastMember {
+                id: 4,
+                name: "Guest".to_string(),
+                character: Some("Guest Role".to_string()),
+                profile_path: None,
+            }],
+        };
 
-        let nfo = build_episode_nfo("Show", 1, 3, &episode);
+        let nfo = build_episode_nfo("Show", 1, 3, &episode, Some(&external_ids), Some(&credits));
 
         assert_eq!(nfo.title, "Episode 3");
         assert_eq!(nfo.showtitle, "Show");
         assert_eq!(nfo.season, 1);
         assert_eq!(nfo.episode, 3);
-        assert_eq!(nfo.unique_ids[0].value, "999");
+        assert_eq!(nfo.premiered.as_deref(), Some("2024-01-15"));
+        assert_eq!(nfo.unique_ids[0].id_type, "tmdb");
+        assert_eq!(nfo.unique_ids[0].is_default, false);
+        assert_eq!(nfo.unique_ids[1].value, "tt1234567");
+        assert_eq!(nfo.unique_ids[1].is_default, true);
+        assert_eq!(nfo.unique_ids[2].value, "42");
+        assert_eq!(nfo.credits[0].name, "Writer");
+        assert_eq!(nfo.directors[0].name, "Director");
+        assert_eq!(nfo.actors.len(), 2);
+        assert_eq!(nfo.actors[1].actor_type.as_deref(), Some("GuestStar"));
     }
 
     #[test]
@@ -1099,5 +1466,70 @@ mod tests {
 
         assert_eq!(parsed.len(), 1);
         assert_eq!(required_seasons_for_nfo(&parsed), BTreeSet::from([1]));
+    }
+
+    #[test]
+    fn test_season_image_targets_only_uses_single_season_directories() {
+        let entries = vec![
+            (
+                PathBuf::from("/tmp/Show/Season 01/Show S01E01.mkv"),
+                ParsedFile {
+                    anime_name: "Show".to_string(),
+                    episode_number: 1,
+                    season_number: Some(1),
+                    episode_type: EpisodeType::Normal,
+                    tags: Vec::new(),
+                    extension: "mkv".to_string(),
+                    is_already_formatted: true,
+                },
+            ),
+            (
+                PathBuf::from("/tmp/Show/Season 02/Show S02E01.mkv"),
+                ParsedFile {
+                    anime_name: "Show".to_string(),
+                    episode_number: 1,
+                    season_number: Some(2),
+                    episode_type: EpisodeType::Normal,
+                    tags: Vec::new(),
+                    extension: "mkv".to_string(),
+                    is_already_formatted: true,
+                },
+            ),
+            (
+                PathBuf::from("/tmp/Show/Mixed/Show S01E02.mkv"),
+                ParsedFile {
+                    anime_name: "Show".to_string(),
+                    episode_number: 2,
+                    season_number: Some(1),
+                    episode_type: EpisodeType::Normal,
+                    tags: Vec::new(),
+                    extension: "mkv".to_string(),
+                    is_already_formatted: true,
+                },
+            ),
+            (
+                PathBuf::from("/tmp/Show/Mixed/Show S02E02.mkv"),
+                ParsedFile {
+                    anime_name: "Show".to_string(),
+                    episode_number: 2,
+                    season_number: Some(2),
+                    episode_type: EpisodeType::Normal,
+                    tags: Vec::new(),
+                    extension: "mkv".to_string(),
+                    is_already_formatted: true,
+                },
+            ),
+        ];
+
+        let targets = season_image_targets(&entries);
+
+        assert_eq!(
+            targets.get(&1).unwrap(),
+            &vec![PathBuf::from("/tmp/Show/Season 01")]
+        );
+        assert_eq!(
+            targets.get(&2).unwrap(),
+            &vec![PathBuf::from("/tmp/Show/Season 02")]
+        );
     }
 }
