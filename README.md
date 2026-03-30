@@ -9,6 +9,7 @@
 - 自动处理多季番剧的集数映射
 - 支持 OVA / SP / OAD 等特殊类型
 - 自动重命名关联的字幕文件
+- 支持导出 Kodi / Jellyfin 兼容的 NFO 文件
 - 支持预览模式，安全可靠
 
 ## 安装
@@ -23,6 +24,7 @@ cargo build --release
 
 ```bash
 anime_renamer [OPTIONS] <PATH>
+anime_renamer nfo [OPTIONS] <PATH>
 ```
 
 ### 参数说明
@@ -39,6 +41,16 @@ anime_renamer [OPTIONS] <PATH>
 | `--season <N>` | `-s` | 手动指定季度（跳过自动映射） | - |
 | `--offset <N>` | `-o` | 集数偏移量（正数增加，负数减少） | `0` |
 | `--tmdb-id <ID>` | `-i` | 直接指定 TMDB ID | - |
+
+### NFO 导出参数
+
+| 参数 | 短参数 | 说明 | 默认值 |
+|------|--------|------|--------|
+| `--recursive` | `-r` | 递归扫描子目录 | - |
+| `--dry-run` | `-n` | 预览模式（不实际写入 NFO） | - |
+| `--language <LANG>` | `-l` | 语言偏好 | `zh-CN` |
+| `--tmdb-id <ID>` | `-i` | 直接指定 TMDB ID | - |
+| `--force` | - | 覆盖已有 NFO 文件 | - |
 
 ### 常用示例
 
@@ -70,6 +82,18 @@ TMDB_API_KEY=your_api_key TMDB_BASE_URL=https://your-tmdb-proxy.example.com anim
 
 # 为每季创建单独文件夹
 anime_renamer /path/to/anime/folder --season-folders
+
+# 为已重命名目录导出 NFO
+anime_renamer nfo /path/to/anime/folder
+
+# 递归导出 Season 目录中的 NFO
+anime_renamer nfo /path/to/anime/folder -r
+
+# 预览将生成哪些 NFO
+anime_renamer nfo /path/to/anime/folder --dry-run
+
+# 强制覆盖已有 NFO
+anime_renamer nfo /path/to/anime/folder --force
 ```
 
 ## 使用示例
@@ -86,6 +110,14 @@ anime_renamer /path/to/anime/folder --season-folders
 孤独搖滾！ S01E01.mkv
 鬼灭之刃 S02E01.mkv
 进击的巨人 S00E01.mkv
+```
+
+**NFO 输出文件：**
+```
+tvshow.nfo
+孤独搖滾！ S01E01.nfo
+鬼灭之刃 S02E01.nfo
+进击的巨人 S00E01.nfo
 ```
 
 ## TMDB ID 支持

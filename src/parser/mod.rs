@@ -87,6 +87,14 @@ impl FileParser {
             .map(|result| result.value)
     }
 
+    fn extract_formatted_season(&self, text: &str) -> Option<u32> {
+        Regex::new(r"[Ss](\d{1,2})[Ee]\d{1,4}")
+            .unwrap()
+            .captures(text)
+            .and_then(|cap| cap.get(1))
+            .and_then(|value| value.as_str().parse::<u32>().ok())
+    }
+
     fn extract_episode(&self, text: &str) -> Option<(u32, String)> {
         // 先获取季度的数字位置，避免重叠
         let mut exclude_positions = Vec::new();
@@ -172,7 +180,9 @@ impl FileParser {
         let already_formatted_regex = Regex::new(r"\s+S\d{2}E\d{2}\s*").unwrap();
         let is_already_formatted = already_formatted_regex.is_match(stem);
 
-        let season_number = self.extract_season(stem);
+        let season_number = self
+            .extract_season(stem)
+            .or_else(|| self.extract_formatted_season(stem));
 
         let (episode_number, episode_match) = self.extract_episode(stem)?;
 
@@ -297,6 +307,7 @@ mod tests {
         let parser = FileParser::new();
         let result = parser.parse("番剧名 S02E220.mkv").unwrap();
         assert_eq!(result.anime_name, "番剧名");
+        assert_eq!(result.season_number, Some(2));
         assert_eq!(result.episode_number, 220);
     }
 

@@ -22,14 +22,29 @@ pub struct TvShow {
 
 #[derive(Debug, Deserialize)]
 pub struct TvDetails {
-    #[allow(dead_code)]
     pub id: u32,
-    #[allow(dead_code)]
     pub name: String,
     #[allow(dead_code)]
     pub original_name: String,
+    #[serde(default)]
+    pub overview: Option<String>,
+    #[serde(default)]
+    pub first_air_date: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub vote_average: f64,
+    #[serde(default)]
+    pub vote_count: u32,
     pub number_of_seasons: u32,
+    #[serde(default)]
     pub seasons: Vec<Season>,
+    #[serde(default)]
+    pub genres: Vec<NamedValue>,
+    #[serde(default)]
+    pub networks: Vec<NamedValue>,
+    #[serde(default)]
+    pub production_companies: Vec<NamedValue>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -40,17 +55,30 @@ pub struct Season {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct SeasonDetails {
     pub season_number: u32,
+    #[serde(default)]
     pub episodes: Vec<Episode>,
 }
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Episode {
+    pub id: u32,
     pub episode_number: u32,
+    pub name: String,
+    #[serde(default)]
+    pub air_date: Option<String>,
+    #[serde(default)]
+    pub overview: Option<String>,
+    #[serde(default)]
+    pub vote_average: f64,
+    #[serde(default)]
+    pub vote_count: u32,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct NamedValue {
     pub name: String,
 }
 
@@ -232,5 +260,85 @@ mod tests {
             client.build_url("/tv/42"),
             "https://example.com/tmdb/3/tv/42"
         );
+    }
+
+    #[test]
+    fn test_tv_details_deserializes_optional_nfo_fields() {
+        let json = serde_json::json!({
+            "id": 123,
+            "name": "Test Show",
+            "original_name": "Test Show Original",
+            "overview": "Overview",
+            "first_air_date": "2024-01-01",
+            "status": "Ended",
+            "vote_average": 8.1,
+            "vote_count": 10,
+            "number_of_seasons": 2,
+            "seasons": [{"season_number": 1, "episode_count": 12, "name": "Season 1"}],
+            "genres": [{"name": "Animation"}],
+            "networks": [{"name": "Tokyo MX"}],
+            "production_companies": [{"name": "Studio"}]
+        });
+
+        let details: TvDetails = serde_json::from_value(json).unwrap();
+
+        assert_eq!(details.id, 123);
+        assert_eq!(details.overview.as_deref(), Some("Overview"));
+        assert_eq!(details.first_air_date.as_deref(), Some("2024-01-01"));
+        assert_eq!(details.status.as_deref(), Some("Ended"));
+        assert_eq!(details.vote_count, 10);
+        assert_eq!(details.genres[0].name, "Animation");
+        assert_eq!(details.networks[0].name, "Tokyo MX");
+    }
+
+    #[test]
+    fn test_season_details_deserializes_optional_episode_fields() {
+        let json = serde_json::json!({
+            "season_number": 1,
+            "episodes": [
+                {
+                    "id": 987,
+                    "episode_number": 2,
+                    "name": "Episode 2",
+                    "air_date": "2024-01-08",
+                    "overview": "Episode overview",
+                    "vote_average": 7.9,
+                    "vote_count": 32
+                }
+            ]
+        });
+
+        let details: SeasonDetails = serde_json::from_value(json).unwrap();
+
+        assert_eq!(details.season_number, 1);
+        assert_eq!(details.episodes[0].id, 987);
+        assert_eq!(details.episodes[0].air_date.as_deref(), Some("2024-01-08"));
+        assert_eq!(
+            details.episodes[0].overview.as_deref(),
+            Some("Episode overview")
+        );
+        assert_eq!(details.episodes[0].vote_count, 32);
+    }
+
+    #[test]
+    fn test_tv_details_defaults_missing_optional_fields() {
+        let json = serde_json::json!({
+            "id": 1,
+            "name": "Fallback",
+            "original_name": "Fallback",
+            "number_of_seasons": 0,
+            "seasons": []
+        });
+
+        let details: TvDetails = serde_json::from_value(json).unwrap();
+
+        assert_eq!(details.overview, None);
+        assert_eq!(details.first_air_date, None);
+        assert_eq!(details.status, None);
+        assert_eq!(details.vote_average, 0.0);
+        assert_eq!(details.vote_count, 0);
+        assert!(details.genres.is_empty());
+        assert!(details.networks.is_empty());
+        assert!(details.production_companies.is_empty());
     }
 }
