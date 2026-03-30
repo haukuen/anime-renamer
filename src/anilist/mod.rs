@@ -204,3 +204,95 @@ impl Media {
         "未知".to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_media(title: Title, start_date: Option<FuzzyDate>) -> Media {
+        Media {
+            id: 1,
+            title,
+            start_date,
+            format: Some("TV".to_string()),
+            episodes: Some(12),
+        }
+    }
+
+    #[test]
+    fn test_get_display_title_prefers_english_when_requested() {
+        let media = make_media(
+            Title {
+                romaji: Some("Bocchi the Rock!".to_string()),
+                english: Some("Bocchi the Rock!".to_string()),
+                native: Some("ぼっち・ざ・ろっく！".to_string()),
+            },
+            None,
+        );
+
+        assert_eq!(media.get_display_title(true), "Bocchi the Rock!");
+    }
+
+    #[test]
+    fn test_get_display_title_falls_back_to_native_then_romaji() {
+        let media = make_media(
+            Title {
+                romaji: Some("Sousou no Frieren".to_string()),
+                english: None,
+                native: Some("葬送のフリーレン".to_string()),
+            },
+            None,
+        );
+        let romaji_only = make_media(
+            Title {
+                romaji: Some("K-On!".to_string()),
+                english: None,
+                native: None,
+            },
+            None,
+        );
+
+        assert_eq!(media.get_display_title(false), "葬送のフリーレン");
+        assert_eq!(romaji_only.get_display_title(false), "K-On!");
+    }
+
+    #[test]
+    fn test_format_date_supports_full_partial_and_missing_dates() {
+        let full = make_media(
+            Title {
+                romaji: None,
+                english: None,
+                native: None,
+            },
+            Some(FuzzyDate {
+                year: Some(2024),
+                month: Some(10),
+                day: Some(5),
+            }),
+        );
+        let partial = make_media(
+            Title {
+                romaji: None,
+                english: None,
+                native: None,
+            },
+            Some(FuzzyDate {
+                year: Some(2024),
+                month: Some(10),
+                day: None,
+            }),
+        );
+        let missing = make_media(
+            Title {
+                romaji: None,
+                english: None,
+                native: None,
+            },
+            None,
+        );
+
+        assert_eq!(full.format_date(), "2024-10-05");
+        assert_eq!(partial.format_date(), "2024-10");
+        assert_eq!(missing.format_date(), "未知");
+    }
+}

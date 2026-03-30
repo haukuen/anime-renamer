@@ -602,3 +602,74 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_season(season_number: u32, episode_count: u32) -> tmdb::Season {
+        tmdb::Season {
+            season_number,
+            episode_count,
+            name: format!("Season {}", season_number),
+        }
+    }
+
+    #[test]
+    fn test_apply_offset_never_drops_below_one() {
+        assert_eq!(apply_offset(1, -10), 1);
+        assert_eq!(apply_offset(3, -1), 2);
+    }
+
+    #[test]
+    fn test_map_episode_to_season_skips_special_season_zero() {
+        let seasons = vec![make_season(0, 2), make_season(1, 12), make_season(2, 12)];
+
+        assert_eq!(map_episode_to_season(13, &seasons), Some((2, 1)));
+    }
+
+    #[test]
+    fn test_compute_season_episode_prefers_explicit_season_arg() {
+        let seasons = vec![make_season(1, 12), make_season(2, 12)];
+
+        let result = compute_season_episode(&EpisodeType::Normal, 5, Some(1), Some(3), 0, &seasons);
+
+        assert_eq!(result, Some((3, 5)));
+    }
+
+    #[test]
+    fn test_compute_season_episode_uses_parsed_season_when_present() {
+        let seasons = vec![make_season(1, 12), make_season(2, 12)];
+
+        let result = compute_season_episode(&EpisodeType::Normal, 7, Some(2), None, 0, &seasons);
+
+        assert_eq!(result, Some((2, 7)));
+    }
+
+    #[test]
+    fn test_compute_season_episode_maps_absolute_episode_across_seasons() {
+        let seasons = vec![make_season(1, 12), make_season(2, 12)];
+
+        let result = compute_season_episode(&EpisodeType::Normal, 14, None, None, 0, &seasons);
+
+        assert_eq!(result, Some((2, 2)));
+    }
+
+    #[test]
+    fn test_compute_season_episode_maps_specials_to_season_zero() {
+        let seasons = vec![make_season(1, 12)];
+
+        let result = compute_season_episode(&EpisodeType::OVA, 3, None, None, -1, &seasons);
+
+        assert_eq!(result, Some((0, 2)));
+    }
+
+    #[test]
+    fn test_compute_season_episode_returns_none_for_movie() {
+        let seasons = vec![make_season(1, 12)];
+
+        let result = compute_season_episode(&EpisodeType::Movie, 1, None, None, 0, &seasons);
+
+        assert_eq!(result, None);
+    }
+}

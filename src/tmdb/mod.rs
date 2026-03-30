@@ -205,4 +205,32 @@ mod tests {
             "https://example.com/api"
         );
     }
+
+    #[test]
+    fn test_build_url_appends_fixed_api_version() {
+        let client = TmdbClient {
+            client: reqwest::Client::new(),
+            api_key: "key".to_string(),
+            base_url: "https://example.com/tmdb".to_string(),
+        };
+
+        assert_eq!(
+            client.build_url("/search/tv"),
+            "https://example.com/tmdb/3/search/tv"
+        );
+    }
+
+    #[test]
+    fn test_build_url_remains_correct_with_legacy_base_url_value() {
+        let client = TmdbClient {
+            client: reqwest::Client::new(),
+            api_key: "key".to_string(),
+            base_url: resolve_base_url_from_env(Some("https://example.com/tmdb/3".to_string())),
+        };
+
+        assert_eq!(
+            client.build_url("/tv/42"),
+            "https://example.com/tmdb/3/tv/42"
+        );
+    }
 }
