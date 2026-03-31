@@ -85,7 +85,7 @@ impl FileParser {
             ],
             paren_regex: Regex::new(r"\([^)]*\)").unwrap(),
             space_regex: Regex::new(r"\s+").unwrap(),
-            already_formatted_regex: Regex::new(r"\s+S\d{2}E\d{2}\s*").unwrap(),
+            already_formatted_regex: Regex::new(r"\s+S\d{2}E\d{2,}\s*").unwrap(),
         }
     }
 
@@ -314,6 +314,7 @@ mod tests {
         assert_eq!(result.anime_name, "番剧名");
         assert_eq!(result.season_number, Some(2));
         assert_eq!(result.episode_number, 220);
+        assert!(result.is_already_formatted);
     }
 
     #[test]

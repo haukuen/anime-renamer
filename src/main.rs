@@ -772,13 +772,32 @@ async fn fetch_season_details_map(
     language: &str,
 ) -> Result<HashMap<u32, SeasonDetails>> {
     let mut season_details = HashMap::new();
+    let mut failed_seasons = Vec::new();
 
     for season in seasons {
-        let details = client
-            .get_season_details(tv_id, *season, language)
-            .await
-            .with_context(|| format!("获取第 {} 季详情失败", season))?;
-        season_details.insert(details.season_number, details);
+        match client.get_season_details(tv_id, *season, language).await {
+            Ok(details) => {
+                season_details.insert(details.season_number, details);
+            }
+            Err(error) => {
+                println!("跳过第 {} 季元数据: {error}", season);
+                failed_seasons.push(*season);
+            }
+        }
+    }
+
+    if season_details.is_empty() {
+        if failed_seasons.is_empty() {
+            bail!("未获取到任何季度详情");
+        }
+        bail!(
+            "所有请求季度的详情都获取失败: {}",
+            failed_seasons
+                .iter()
+                .map(|season| season.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     Ok(season_details)
@@ -1485,6 +1504,18 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].1.anime_name, "Show");
         assert_eq!(parsed[0].1.season_number, Some(1));
+    }
+
+    #[test]
+    fn test_collect_nfo_candidates_keeps_formatted_large_episode_numbers() {
+        let parser = FileParser::new();
+        let files = vec![PathBuf::from("/tmp/Show S01E120.mkv")];
+
+        let parsed = collect_nfo_candidates(&files, &parser);
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].1.season_number, Some(1));
+        assert_eq!(parsed[0].1.episode_number, 120);
     }
 
     #[test]
