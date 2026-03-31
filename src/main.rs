@@ -6,23 +6,42 @@ mod tmdb;
 
 use anilist::AniListClient;
 use anyhow::{Context, Result, bail};
-use clap::Parser as ClapParser;
+use clap::{Args, Parser as ClapParser, Subcommand};
 use nfo::{ActorNfo, EpisodeNfo, NfoWriter, PersonNfo, Rating, TvShowNfo, UniqueId, WriteAction};
 use parser::{EpisodeType, FileParser, ParsedFile, extract_tmdb_id};
 use scanner::FileScanner;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use tmdb::{Episode, EpisodeCredits, EpisodeExternalIds, TmdbClient, TvDetails};
+use tmdb::{Episode, EpisodeCredits, EpisodeExternalIds, SeasonDetails, TmdbClient, TvDetails};
 
 type ParsedEntry = (PathBuf, ParsedFile);
 type RenameEntry = (PathBuf, PathBuf, u32, u32);
 
 #[derive(ClapParser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
-struct RenameArgs {
+#[command(
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true,
+    flatten_help = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    #[command(flatten)]
+    rename: RenameCliArgs,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum Command {
+    Nfo(NfoArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+#[command(author, version, about, long_about = None)]
+struct RenameCliArgs {
     /// 要扫描的目录路径
-    path: String,
+    path: Option<String>,
 
     /// 是否递归扫描子目录
     #[arg(short, long)]
@@ -65,14 +84,42 @@ struct RenameArgs {
     tmdb_id: Option<u32>,
 }
 
-#[derive(ClapParser, Debug, Clone)]
-#[command(
-    name = "anime_renamer nfo",
-    author,
-    version,
-    about = "导出 Kodi / Jellyfin 兼容的 NFO 文件",
-    long_about = None
-)]
+#[derive(Debug, Clone)]
+struct RenameArgs {
+    path: String,
+    recursive: bool,
+    dry_run: bool,
+    name: Option<String>,
+    language: String,
+    keep_tags: bool,
+    season_folders: bool,
+    use_anilist: bool,
+    season: Option<u32>,
+    offset: i32,
+    tmdb_id: Option<u32>,
+}
+
+impl TryFrom<RenameCliArgs> for RenameArgs {
+    type Error = anyhow::Error;
+
+    fn try_from(value: RenameCliArgs) -> Result<Self> {
+        Ok(Self {
+            path: value.path.context("缺少要扫描的目录路径")?,
+            recursive: value.recursive,
+            dry_run: value.dry_run,
+            name: value.name,
+            language: value.language,
+            keep_tags: value.keep_tags,
+            season_folders: value.season_folders,
+            use_anilist: value.use_anilist,
+            season: value.season,
+            offset: value.offset,
+            tmdb_id: value.tmdb_id,
+        })
+    }
+}
+
+#[derive(Args, Debug, Clone)]
 struct NfoArgs {
     /// 要扫描的目录路径
     path: String,
@@ -149,30 +196,30 @@ fn map_episode_to_season(episode_num: u32, seasons: &[tmdb::Season]) -> Option<(
     None
 }
 
+fn file_name_lossy(path: &Path) -> Option<String> {
+    path.file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
+fn display_file_name(path: &Path) -> String {
+    file_name_lossy(path).unwrap_or_else(|| path.display().to_string())
+}
+
 fn print_rename_preview(rename_map: &[RenameEntry], season_folders: bool) {
     println!("重命名预览:\n");
     for (i, (old_path, new_path, season, episode)) in rename_map.iter().enumerate() {
         println!("[{}] S{:02}E{:02}", i + 1, season, episode);
-        println!(
-            "  原文件: {}",
-            old_path.file_name().unwrap().to_str().unwrap()
-        );
+        println!("  原文件: {}", display_file_name(old_path));
 
         if season_folders {
             if let Some(old_parent) = old_path.parent() {
                 let relative_path = new_path.strip_prefix(old_parent).unwrap_or(new_path);
                 println!("  新路径: {}", relative_path.display());
             } else {
-                println!(
-                    "  新文件: {}",
-                    new_path.file_name().unwrap().to_str().unwrap()
-                );
+                println!("  新文件: {}", display_file_name(new_path));
             }
         } else {
-            println!(
-                "  新文件: {}",
-                new_path.file_name().unwrap().to_str().unwrap()
-            );
+            println!("  新文件: {}", display_file_name(new_path));
         }
 
         let subtitles = FileScanner::find_associated_subtitles(old_path);
@@ -264,8 +311,12 @@ fn collect_rename_candidates(files: &[PathBuf], parser: &FileParser) -> Vec<Pars
     let mut skipped_formatted = 0;
 
     for file in files {
-        let filename = file.file_name().unwrap().to_str().unwrap();
-        if let Some(parsed) = parser.parse(filename) {
+        let Some(filename) = file_name_lossy(file) else {
+            println!("无法获取文件名: {}", file.display());
+            continue;
+        };
+
+        if let Some(parsed) = parser.parse(&filename) {
             if parsed.is_already_formatted {
                 skipped_formatted += 1;
                 continue;
@@ -287,8 +338,12 @@ fn collect_nfo_candidates(files: &[PathBuf], parser: &FileParser) -> Vec<ParsedE
     let mut parsed_files = Vec::new();
 
     for file in files {
-        let filename = file.file_name().unwrap().to_str().unwrap();
-        match parser.parse(filename) {
+        let Some(filename) = file_name_lossy(file) else {
+            println!("无法获取文件名: {}", file.display());
+            continue;
+        };
+
+        match parser.parse(&filename) {
             Some(parsed) if !parsed.is_already_formatted => {
                 println!("跳过非规范命名文件: {}", filename);
             }
@@ -495,6 +550,34 @@ async fn run_rename(args: &RenameArgs) -> Result<()> {
         return Ok(());
     }
 
+    if args.use_anilist {
+        println!("按参数要求使用 AniList...");
+
+        let anilist_client = AniListClient::new();
+        let anilist_results = anilist_client
+            .search_anime(&anime_name)
+            .await
+            .context("AniList 搜索失败")?;
+
+        if anilist_results.is_empty() {
+            println!("AniList 未找到匹配的番剧");
+            return Ok(());
+        }
+
+        let anime = &anilist_results[0];
+        let Some(display_name) = prompt_anilist_title(anime).await? else {
+            println!("未找到可用的标题");
+            return Ok(());
+        };
+
+        println!("找到匹配: {} ({})", display_name, anime.format_date());
+        println!("\n注意: AniList 不提供季度信息，将使用文件名中的季度标记");
+        println!("如果文件名没有季度标记（如 'V', 'Season 5'），可能会映射错误\n");
+
+        handle_anilist_renaming(args, &parsed_files, &display_name)?;
+        return Ok(());
+    }
+
     let client = TmdbClient::new();
     println!("搜索 TMDB...");
 
@@ -503,12 +586,8 @@ async fn run_rename(args: &RenameArgs) -> Result<()> {
         .await
         .context("搜索失败")?;
 
-    if results.is_empty() || args.use_anilist {
-        if args.use_anilist {
-            println!("按参数要求使用 AniList...");
-        } else {
-            println!("TMDB 未找到结果，尝试 AniList...");
-        }
+    if results.is_empty() {
+        println!("TMDB 未找到结果，尝试 AniList...");
 
         let anilist_client = AniListClient::new();
         let anilist_results = anilist_client
@@ -588,10 +667,7 @@ fn build_tmdb_rename_map(
             Some(result) => result,
             None => {
                 if parsed.episode_type == EpisodeType::Movie {
-                    println!(
-                        "跳过剧场版: {}",
-                        file_path.file_name().unwrap().to_str().unwrap()
-                    );
+                    println!("跳过剧场版: {}", display_file_name(file_path));
                 } else {
                     let ep = apply_offset(parsed.episode_number, args.offset);
                     println!("无法映射第 {} 集到任何季", ep);
@@ -689,26 +765,40 @@ fn season_image_targets(parsed_files: &[ParsedEntry]) -> HashMap<u32, Vec<PathBu
     targets
 }
 
-async fn fetch_episode_lookup(
+async fn fetch_season_details_map(
     client: &TmdbClient,
     tv_id: u32,
     seasons: &BTreeSet<u32>,
     language: &str,
-) -> Result<HashMap<(u32, u32), Episode>> {
-    let mut episodes = HashMap::new();
+) -> Result<HashMap<u32, SeasonDetails>> {
+    let mut season_details = HashMap::new();
 
     for season in seasons {
         let details = client
             .get_season_details(tv_id, *season, language)
             .await
             .with_context(|| format!("获取第 {} 季详情失败", season))?;
+        season_details.insert(details.season_number, details);
+    }
 
-        for episode in details.episodes {
-            episodes.insert((details.season_number, episode.episode_number), episode);
+    Ok(season_details)
+}
+
+fn build_episode_lookup(
+    season_details_map: &HashMap<u32, SeasonDetails>,
+) -> HashMap<(u32, u32), Episode> {
+    let mut episodes = HashMap::new();
+
+    for details in season_details_map.values() {
+        for episode in &details.episodes {
+            episodes.insert(
+                (details.season_number, episode.episode_number),
+                episode.clone(),
+            );
         }
     }
 
-    Ok(episodes)
+    episodes
 }
 
 fn record_write_action(action: WriteAction, written: &mut usize, skipped_existing: &mut usize) {
@@ -743,6 +833,23 @@ fn collect_studios(details: &TvDetails) -> Vec<String> {
     };
 
     source.iter().map(|item| item.name.clone()).collect()
+}
+
+fn resolve_season_poster_path<'a>(
+    season_number: u32,
+    season_details_map: &'a HashMap<u32, SeasonDetails>,
+    tv_details: &'a TvDetails,
+) -> Option<&'a str> {
+    season_details_map
+        .get(&season_number)
+        .and_then(|details| details.poster_path.as_deref())
+        .or_else(|| {
+            tv_details
+                .seasons
+                .iter()
+                .find(|item| item.season_number == season_number)
+                .and_then(|season| season.poster_path.as_deref())
+        })
 }
 
 fn build_episode_unique_ids(
@@ -962,7 +1069,9 @@ async fn handle_nfo_export(args: &NfoArgs) -> Result<()> {
     println!("找到匹配: {} (TMDB ID: {})", details.name, show_id);
 
     let seasons = required_seasons_for_nfo(&parsed_files);
-    let episode_lookup = fetch_episode_lookup(&client, show_id, &seasons, &args.language).await?;
+    let season_details_map =
+        fetch_season_details_map(&client, show_id, &seasons, &args.language).await?;
+    let episode_lookup = build_episode_lookup(&season_details_map);
     let season_targets = season_image_targets(&parsed_files);
     let writer = NfoWriter::new(args.dry_run, args.force);
 
@@ -1036,14 +1145,8 @@ async fn handle_nfo_export(args: &NfoArgs) -> Result<()> {
         let Some(target_dirs) = season_targets.get(season) else {
             continue;
         };
-        let Some(season_info) = details
-            .seasons
-            .iter()
-            .find(|item| item.season_number == *season)
+        let Some(poster_path) = resolve_season_poster_path(*season, &season_details_map, &details)
         else {
-            continue;
-        };
-        let Some(poster_path) = season_info.poster_path.as_deref() else {
             missing_images += target_dirs.len();
             continue;
         };
@@ -1183,20 +1286,18 @@ async fn handle_nfo_export(args: &NfoArgs) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let raw_args: Vec<OsString> = std::env::args_os().collect();
+    let cli = Cli::parse();
 
-    if raw_args.get(1).and_then(|arg| arg.to_str()) == Some("nfo") {
-        let mut nfo_args = vec![raw_args[0].clone()];
-        nfo_args.extend(raw_args.into_iter().skip(2));
-        handle_nfo_export(&NfoArgs::parse_from(nfo_args)).await
-    } else {
-        run_rename(&RenameArgs::parse()).await
+    match cli.command {
+        Some(Command::Nfo(args)) => handle_nfo_export(&args).await,
+        None => run_rename(&RenameArgs::try_from(cli.rename)?).await,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1274,6 +1375,43 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn make_season_details(season_number: u32, poster_path: Option<&str>) -> SeasonDetails {
+        SeasonDetails {
+            season_number,
+            poster_path: poster_path.map(str::to_string),
+            episodes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_default_rename_command() {
+        let cli = Cli::try_parse_from(["anime_renamer", "/tmp/show"]).unwrap();
+
+        assert!(cli.command.is_none());
+        assert_eq!(cli.rename.path.as_deref(), Some("/tmp/show"));
+    }
+
+    #[test]
+    fn test_cli_parses_nfo_subcommand() {
+        let cli = Cli::try_parse_from(["anime_renamer", "nfo", "/tmp/show", "--force"]).unwrap();
+
+        match cli.command {
+            Some(Command::Nfo(args)) => {
+                assert_eq!(args.path, "/tmp/show");
+                assert!(args.force);
+            }
+            None => panic!("应当解析为 nfo 子命令"),
+        }
+    }
+
+    #[test]
+    fn test_cli_help_lists_nfo_subcommand() {
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(help.contains("nfo"));
+        assert!(help.contains("anime_renamer nfo"));
     }
 
     #[test]
@@ -1377,6 +1515,42 @@ mod tests {
         let nfo = build_tvshow_nfo(&details);
 
         assert_eq!(nfo.studios, vec!["Studio A"]);
+    }
+
+    #[test]
+    fn test_resolve_season_poster_path_prefers_season_details() {
+        let mut details = make_tv_details(Vec::new(), vec!["Studio A"]);
+        details.seasons = vec![tmdb::Season {
+            season_number: 2,
+            episode_count: 12,
+            name: "Season 2".to_string(),
+            poster_path: Some("/tv-details.jpg".to_string()),
+        }];
+
+        let season_details_map = HashMap::from([(2, make_season_details(2, Some("/season.jpg")))]);
+
+        assert_eq!(
+            resolve_season_poster_path(2, &season_details_map, &details),
+            Some("/season.jpg")
+        );
+    }
+
+    #[test]
+    fn test_resolve_season_poster_path_falls_back_to_tv_details() {
+        let mut details = make_tv_details(Vec::new(), vec!["Studio A"]);
+        details.seasons = vec![tmdb::Season {
+            season_number: 2,
+            episode_count: 12,
+            name: "Season 2".to_string(),
+            poster_path: Some("/tv-details.jpg".to_string()),
+        }];
+
+        let season_details_map = HashMap::from([(2, make_season_details(2, None))]);
+
+        assert_eq!(
+            resolve_season_poster_path(2, &season_details_map, &details),
+            Some("/tv-details.jpg")
+        );
     }
 
     #[test]

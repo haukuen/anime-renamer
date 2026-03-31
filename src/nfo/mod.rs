@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -137,33 +136,14 @@ impl NfoWriter {
     }
 
     fn write_file(&self, path: &Path, content: &str) -> Result<WriteOutcome> {
-        if path.exists() && !self.force {
-            return Ok(WriteOutcome {
-                path: path.to_path_buf(),
-                action: WriteAction::SkippedExisting,
-            });
-        }
-
-        if self.dry_run {
-            return Ok(WriteOutcome {
-                path: path.to_path_buf(),
-                action: WriteAction::WouldWrite,
-            });
-        }
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        fs::write(path, content)?;
-
-        Ok(WriteOutcome {
-            path: path.to_path_buf(),
-            action: WriteAction::Written,
-        })
+        self.write_bytes(path, content.as_bytes())
     }
 
     fn write_binary_file(&self, path: &Path, bytes: &[u8]) -> Result<WriteOutcome> {
+        self.write_bytes(path, bytes)
+    }
+
+    fn write_bytes(&self, path: &Path, bytes: &[u8]) -> Result<WriteOutcome> {
         if path.exists() && !self.force {
             return Ok(WriteOutcome {
                 path: path.to_path_buf(),
@@ -265,14 +245,14 @@ pub fn tvshow_backdrop_image_path(root: &Path, extension: &str) -> PathBuf {
 }
 
 pub fn season_primary_image_path(season_dir: &Path, extension: &str) -> PathBuf {
-    season_dir.join(format!("poster.{}", normalize_extension(extension)))
+    season_dir.join(format!("season-poster.{}", normalize_extension(extension)))
 }
 
 pub fn episode_thumb_image_path(video_path: &Path, extension: &str) -> PathBuf {
     let mut file_name = video_path
         .file_stem()
         .map(|value| value.to_os_string())
-        .unwrap_or_else(OsString::new);
+        .unwrap_or_default();
     file_name.push("-thumb.");
     file_name.push(normalize_extension(extension));
     video_path.with_file_name(file_name)
@@ -565,7 +545,7 @@ mod tests {
         );
         assert_eq!(
             season_primary_image_path(Path::new("/media/Show/Season 1"), "jpeg"),
-            Path::new("/media/Show/Season 1/poster.jpeg")
+            Path::new("/media/Show/Season 1/season-poster.jpeg")
         );
         assert_eq!(
             episode_thumb_image_path(episode, "png"),

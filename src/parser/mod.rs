@@ -31,6 +31,12 @@ pub struct FileParser {
     episode_chain: MatcherChain,
     tag_regex: Regex,
     special_keywords: Vec<(Regex, EpisodeType)>,
+    formatted_season_regex: Regex,
+    resolution_regex: Regex,
+    season_cleanup_regexes: Vec<Regex>,
+    paren_regex: Regex,
+    space_regex: Regex,
+    already_formatted_regex: Regex,
 }
 
 impl FileParser {
@@ -68,6 +74,18 @@ impl FileParser {
             episode_chain,
             tag_regex: Regex::new(r"\[([^\]]+)\]").unwrap(),
             special_keywords,
+            formatted_season_regex: Regex::new(r"[Ss](\d{1,2})[Ee]\d{1,4}").unwrap(),
+            resolution_regex: Regex::new(r"\[(1080|720|480|2160|4K)[^\]]*\]").unwrap(),
+            season_cleanup_regexes: vec![
+                Regex::new(r"[Ss]eason\s*\d{1,2}").unwrap(),
+                Regex::new(r"第\s*\d{1,2}\s*季").unwrap(),
+                Regex::new(r"\b[IVX]+\b").unwrap(),
+                Regex::new(r"[Ss]\d{1,2}(?:\s|[\]\[]|$)").unwrap(),
+                Regex::new(r"_[Ss]\d{1,4}").unwrap(),
+            ],
+            paren_regex: Regex::new(r"\([^)]*\)").unwrap(),
+            space_regex: Regex::new(r"\s+").unwrap(),
+            already_formatted_regex: Regex::new(r"\s+S\d{2}E\d{2}\s*").unwrap(),
         }
     }
 
@@ -88,8 +106,7 @@ impl FileParser {
     }
 
     fn extract_formatted_season(&self, text: &str) -> Option<u32> {
-        Regex::new(r"[Ss](\d{1,2})[Ee]\d{1,4}")
-            .unwrap()
+        self.formatted_season_regex
             .captures(text)
             .and_then(|cap| cap.get(1))
             .and_then(|value| value.as_str().parse::<u32>().ok())
@@ -104,8 +121,7 @@ impl FileParser {
         }
 
         // 排除分辨率标签的位置（如 [1080], [720]）
-        let resolution_regex = Regex::new(r"\[(1080|720|480|2160|4K)[^\]]*\]").unwrap();
-        for cap in resolution_regex.captures_iter(text) {
+        for cap in self.resolution_regex.captures_iter(text) {
             if let Some(m) = cap.get(0) {
                 exclude_positions.push((m.start(), m.end()));
             }
@@ -123,21 +139,12 @@ impl FileParser {
             name = pattern.replace_all(&name, " ").to_string();
         }
 
-        let season_cleanup = vec![
-            Regex::new(r"[Ss]eason\s*\d{1,2}").unwrap(),
-            Regex::new(r"第\s*\d{1,2}\s*季").unwrap(),
-            Regex::new(r"\b[IVX]+\b").unwrap(),
-            Regex::new(r"[Ss]\d{1,2}(?:\s|[\]\[]|$)").unwrap(),
-            Regex::new(r"_[Ss]\d{1,4}").unwrap(), // 添加 _S001 格式
-        ];
-
-        for pattern in &season_cleanup {
+        for pattern in &self.season_cleanup_regexes {
             name = pattern.replace_all(&name, " ").to_string();
         }
 
         // 移除括号及其内容（通常是总集数）
-        let paren_regex = Regex::new(r"\([^)]*\)").unwrap();
-        name = paren_regex.replace_all(&name, " ").to_string();
+        name = self.paren_regex.replace_all(&name, " ").to_string();
 
         if let Some(pos) = name.find('：') {
             name = name[..pos].to_string();
@@ -153,8 +160,7 @@ impl FileParser {
             .trim()
             .to_string();
 
-        let space_regex = Regex::new(r"\s+").unwrap();
-        name = space_regex.replace_all(&name, " ").to_string();
+        name = self.space_regex.replace_all(&name, " ").to_string();
 
         name.trim().to_string()
     }
@@ -177,8 +183,7 @@ impl FileParser {
 
         let episode_type = self.detect_special_type(stem);
 
-        let already_formatted_regex = Regex::new(r"\s+S\d{2}E\d{2}\s*").unwrap();
-        let is_already_formatted = already_formatted_regex.is_match(stem);
+        let is_already_formatted = self.already_formatted_regex.is_match(stem);
 
         let season_number = self
             .extract_season(stem)
@@ -399,6 +404,8 @@ mod tests {
             println!("  番剧名: {}", parsed.anime_name);
             println!("  集数: {}", parsed.episode_number);
             println!("  季度: {:?}", parsed.season_number);
+            assert_eq!(parsed.season_number, Some(4));
+            assert_eq!(parsed.episode_number, 22);
         } else {
             panic!("解析失败");
         }

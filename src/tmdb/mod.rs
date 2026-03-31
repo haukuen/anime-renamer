@@ -2,10 +2,12 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::env;
 use std::path::Path;
+use std::time::Duration;
 
 const DEFAULT_API_KEY: &str = "454dec4903d35bb318ab2ad9e578c615";
 const DEFAULT_BASE_URL: &str = "https://api.themoviedb.org";
 const API_VERSION_PATH: &str = "/3";
+const HTTP_TIMEOUT_SECONDS: u64 = 30;
 
 #[derive(Debug, Deserialize)]
 pub struct SearchResult {
@@ -144,7 +146,7 @@ pub struct TmdbClient {
 impl TmdbClient {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: build_http_client(),
             api_key: resolve_api_key(),
             base_url: resolve_base_url(),
         }
@@ -163,12 +165,11 @@ impl TmdbClient {
             ])
             .send()
             .await
-            .context("Failed to send search request")?;
+            .context("TMDB 搜索请求发送失败")?
+            .error_for_status()
+            .context("TMDB 搜索请求返回错误状态")?;
 
-        let search_result: SearchResult = response
-            .json()
-            .await
-            .context("Failed to parse search response")?;
+        let search_result: SearchResult = response.json().await.context("TMDB 搜索响应解析失败")?;
 
         Ok(search_result.results)
     }
@@ -182,12 +183,11 @@ impl TmdbClient {
             .query(&[("api_key", self.api_key.as_str()), ("language", language)])
             .send()
             .await
-            .context("Failed to send tv details request")?;
+            .context("TMDB 详情请求发送失败")?
+            .error_for_status()
+            .context("TMDB 详情请求返回错误状态")?;
 
-        let details: TvDetails = response
-            .json()
-            .await
-            .context("Failed to parse tv details response")?;
+        let details: TvDetails = response.json().await.context("TMDB 详情响应解析失败")?;
 
         Ok(details)
     }
@@ -207,12 +207,11 @@ impl TmdbClient {
             .query(&[("api_key", self.api_key.as_str()), ("language", language)])
             .send()
             .await
-            .context("Failed to send season details request")?;
+            .context("TMDB 季详情请求发送失败")?
+            .error_for_status()
+            .context("TMDB 季详情请求返回错误状态")?;
 
-        let season: SeasonDetails = response
-            .json()
-            .await
-            .context("Failed to parse season details response")?;
+        let season: SeasonDetails = response.json().await.context("TMDB 季详情响应解析失败")?;
 
         Ok(season)
     }
@@ -223,14 +222,11 @@ impl TmdbClient {
             .get(self.build_image_url(file_path))
             .send()
             .await
-            .context("Failed to send image download request")?
+            .context("TMDB 图片下载请求发送失败")?
             .error_for_status()
-            .context("TMDB image download failed")?;
+            .context("TMDB 图片下载返回错误状态")?;
 
-        let bytes = response
-            .bytes()
-            .await
-            .context("Failed to read image response body")?;
+        let bytes = response.bytes().await.context("TMDB 图片响应读取失败")?;
 
         Ok(bytes.to_vec())
     }
@@ -253,12 +249,14 @@ impl TmdbClient {
             .query(&[("api_key", self.api_key.as_str()), ("language", language)])
             .send()
             .await
-            .context("Failed to send episode credits request")?;
+            .context("TMDB 单集演职员请求发送失败")?
+            .error_for_status()
+            .context("TMDB 单集演职员请求返回错误状态")?;
 
         let credits: EpisodeCredits = response
             .json()
             .await
-            .context("Failed to parse episode credits response")?;
+            .context("TMDB 单集演职员响应解析失败")?;
 
         Ok(credits)
     }
@@ -280,12 +278,14 @@ impl TmdbClient {
             .query(&[("api_key", self.api_key.as_str())])
             .send()
             .await
-            .context("Failed to send episode external ids request")?;
+            .context("TMDB 单集外部 ID 请求发送失败")?
+            .error_for_status()
+            .context("TMDB 单集外部 ID 请求返回错误状态")?;
 
         let external_ids: EpisodeExternalIds = response
             .json()
             .await
-            .context("Failed to parse episode external ids response")?;
+            .context("TMDB 单集外部 ID 响应解析失败")?;
 
         Ok(external_ids)
     }
@@ -297,6 +297,13 @@ impl TmdbClient {
     fn build_image_url(&self, file_path: &str) -> String {
         format!("https://image.tmdb.org/t/p/original{}", file_path)
     }
+}
+
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
+        .build()
+        .expect("创建 TMDB HTTP 客户端失败")
 }
 
 fn resolve_api_key() -> String {

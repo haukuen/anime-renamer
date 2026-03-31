@@ -1,7 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 const API_URL: &str = "https://graphql.anilist.co";
+const HTTP_TIMEOUT_SECONDS: u64 = 30;
 
 #[derive(Debug, Serialize)]
 struct GraphQLRequest {
@@ -12,6 +14,13 @@ struct GraphQLRequest {
 #[derive(Debug, Deserialize)]
 struct GraphQLResponse {
     data: Option<Data>,
+    #[serde(default)]
+    errors: Vec<GraphQLError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQLError {
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,7 +70,7 @@ pub struct AniListClient {
 impl AniListClient {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: build_http_client(),
         }
     }
 
@@ -105,15 +114,15 @@ impl AniListClient {
             .json(&request)
             .send()
             .await
-            .context("Failed to send AniList request")?;
+            .context("AniList 请求发送失败")?
+            .error_for_status()
+            .context("AniList 请求返回错误状态")?;
 
-        let graphql_response: GraphQLResponse = response
-            .json()
-            .await
-            .context("Failed to parse AniList response")?;
+        let graphql_response = response.json().await.context("AniList 响应解析失败")?;
 
-        Ok(graphql_response
-            .data
+        let data = extract_graphql_data(graphql_response)?;
+
+        Ok(data
             .and_then(|d| d.page)
             .map(|p| p.media)
             .unwrap_or_default())
@@ -158,15 +167,35 @@ impl AniListClient {
             .json(&request)
             .send()
             .await
-            .context("Failed to send AniList request")?;
+            .context("AniList 请求发送失败")?
+            .error_for_status()
+            .context("AniList 请求返回错误状态")?;
 
-        let graphql_response: GraphQLResponse = response
-            .json()
-            .await
-            .context("Failed to parse AniList response")?;
+        let graphql_response = response.json().await.context("AniList 响应解析失败")?;
 
-        Ok(graphql_response.data.and_then(|d| d.media))
+        Ok(extract_graphql_data(graphql_response)?.and_then(|d| d.media))
     }
+}
+
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECONDS))
+        .build()
+        .expect("创建 AniList HTTP 客户端失败")
+}
+
+fn extract_graphql_data(response: GraphQLResponse) -> Result<Option<Data>> {
+    if !response.errors.is_empty() {
+        let message = response
+            .errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join("；");
+        bail!("AniList GraphQL 错误: {}", message);
+    }
+
+    Ok(response.data)
 }
 
 impl Media {
@@ -294,5 +323,19 @@ mod tests {
         assert_eq!(full.format_date(), "2024-10-05");
         assert_eq!(partial.format_date(), "2024-10");
         assert_eq!(missing.format_date(), "未知");
+    }
+
+    #[test]
+    fn test_extract_graphql_data_returns_error_when_response_contains_errors() {
+        let response = GraphQLResponse {
+            data: None,
+            errors: vec![GraphQLError {
+                message: "Too Many Requests.".to_string(),
+            }],
+        };
+
+        let err = extract_graphql_data(response).unwrap_err();
+        assert!(err.to_string().contains("AniList GraphQL 错误"));
+        assert!(err.to_string().contains("Too Many Requests."));
     }
 }

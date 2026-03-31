@@ -200,8 +200,9 @@ impl Matcher for RomanSeasonMatcher {
 
             // 额外验证：前面应该有空格或方括号
             let before_ok = roman_match.start() == 0 || {
-                text.chars()
-                    .nth(roman_match.start().saturating_sub(1))
+                text[..roman_match.start()]
+                    .chars()
+                    .next_back()
                     .is_some_and(|c| c.is_whitespace() || c == '[' || c == ']')
             };
 
