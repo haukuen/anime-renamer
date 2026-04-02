@@ -17,6 +17,7 @@ use scanner::FileScanner;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tmdb::{Episode, EpisodeCredits, EpisodeExternalIds, SeasonDetails, TmdbClient, TvDetails};
+use tokio::task::JoinSet;
 
 type ParsedEntry = (PathBuf, ParsedFile);
 type RenameEntry = (PathBuf, PathBuf, u32, u32);
@@ -775,17 +776,34 @@ async fn fetch_season_details_map(
     seasons: &BTreeSet<u32>,
     language: &str,
 ) -> Result<HashMap<u32, SeasonDetails>> {
+    let language = language.to_string();
     let mut season_details = HashMap::new();
     let mut failed_seasons = Vec::new();
+    let mut tasks = JoinSet::new();
 
     for season in seasons {
-        match client.get_season_details(tv_id, *season, language).await {
+        let client = client.clone();
+        let language = language.clone();
+        let season_number = *season;
+        tasks.spawn(async move {
+            (
+                season_number,
+                client
+                    .get_season_details(tv_id, season_number, &language)
+                    .await,
+            )
+        });
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        let (season, details_result) = result.context("季度详情任务执行失败")?;
+        match details_result {
             Ok(details) => {
                 season_details.insert(details.season_number, details);
             }
             Err(error) => {
                 println!("跳过第 {} 季元数据: {error}", season);
-                failed_seasons.push(*season);
+                failed_seasons.push(season);
             }
         }
     }
@@ -1064,6 +1082,154 @@ fn print_nfo_outcome(path: &Path, action: WriteAction) {
     println!("{}: {}", label, path.display());
 }
 
+#[derive(Default)]
+struct EpisodeExportStats {
+    nfo_written: usize,
+    nfo_skipped_existing: usize,
+    image_written: usize,
+    image_skipped_existing: usize,
+    missing_images: usize,
+    image_failures: usize,
+    missing_metadata: usize,
+    metadata_enrichment_failures: usize,
+}
+
+impl EpisodeExportStats {
+    fn record_nfo_action(&mut self, action: WriteAction) {
+        record_write_action(
+            action,
+            &mut self.nfo_written,
+            &mut self.nfo_skipped_existing,
+        );
+    }
+
+    fn record_image_action(&mut self, action: WriteAction) {
+        record_write_action(
+            action,
+            &mut self.image_written,
+            &mut self.image_skipped_existing,
+        );
+    }
+}
+
+struct EpisodeExportJob {
+    client: TmdbClient,
+    writer: NfoWriter,
+    force: bool,
+    language: String,
+    show_id: u32,
+    show_title: String,
+    video_path: PathBuf,
+    parsed: ParsedFile,
+    episode: Option<Episode>,
+}
+
+impl EpisodeExportJob {
+    async fn run(self) -> Result<EpisodeExportStats> {
+        let Self {
+            client,
+            writer,
+            force,
+            language,
+            show_id,
+            show_title,
+            video_path,
+            parsed,
+            episode,
+        } = self;
+
+        let mut stats = EpisodeExportStats::default();
+        let season = parsed
+            .season_number
+            .expect("collect_nfo_candidates ensures season");
+
+        let Some(episode) = episode else {
+            println!(
+                "跳过缺少 TMDB 剧集元数据的文件: {}",
+                video_path.file_name().unwrap().to_string_lossy()
+            );
+            stats.missing_metadata += 1;
+            return Ok(stats);
+        };
+
+        let episode_nfo_target = episode_nfo_path(&video_path);
+        if should_write_path(&episode_nfo_target, force) {
+            let (external_ids_result, credits_result) = tokio::join!(
+                client.get_episode_external_ids(show_id, season, parsed.episode_number),
+                client.get_episode_credits(show_id, season, parsed.episode_number, &language)
+            );
+
+            let external_ids = match external_ids_result {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    println!(
+                        "跳过单集外部 ID 增强: {} ({error})",
+                        video_path.file_name().unwrap().to_string_lossy()
+                    );
+                    stats.metadata_enrichment_failures += 1;
+                    None
+                }
+            };
+
+            let credits = match credits_result {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    println!(
+                        "跳过单集演职员增强: {} ({error})",
+                        video_path.file_name().unwrap().to_string_lossy()
+                    );
+                    stats.metadata_enrichment_failures += 1;
+                    None
+                }
+            };
+
+            let episode_nfo = build_episode_nfo(
+                &show_title,
+                season,
+                parsed.episode_number,
+                &episode,
+                external_ids.as_ref(),
+                credits.as_ref(),
+            );
+            let outcome = writer.write_episode(&video_path, &episode_nfo)?;
+            print_nfo_outcome(&outcome.path, outcome.action);
+            stats.record_nfo_action(outcome.action);
+        } else {
+            print_nfo_outcome(&episode_nfo_target, WriteAction::SkippedExisting);
+            stats.record_nfo_action(WriteAction::SkippedExisting);
+        }
+
+        if let Some(still_path) = episode.still_path.as_deref() {
+            let extension = tmdb::image_extension(still_path);
+            let target_path = episode_thumb_image_path(&video_path, extension);
+            if should_write_path(&target_path, force) {
+                match client.download_image(still_path).await {
+                    Ok(bytes) => {
+                        let outcome =
+                            writer.write_episode_thumb_image(&video_path, extension, &bytes)?;
+                        print_nfo_outcome(&outcome.path, outcome.action);
+                        stats.record_image_action(outcome.action);
+                    }
+                    Err(error) => {
+                        println!(
+                            "跳过单集缩略图下载失败: {} ({error})",
+                            video_path.file_name().unwrap().to_string_lossy()
+                        );
+                        stats.image_failures += 1;
+                    }
+                }
+            } else {
+                print_nfo_outcome(&target_path, WriteAction::SkippedExisting);
+                stats.record_image_action(WriteAction::SkippedExisting);
+            }
+        } else {
+            stats.missing_images += 1;
+        }
+
+        Ok(stats)
+    }
+}
+
 async fn handle_nfo_export(args: &NfoArgs) -> Result<()> {
     println!("扫描目录: {}", args.path);
 
@@ -1106,6 +1272,7 @@ async fn handle_nfo_export(args: &NfoArgs) -> Result<()> {
     let episode_lookup = build_episode_lookup(&season_details_map);
     let season_targets = season_image_targets(&parsed_files);
     let writer = NfoWriter::new(args.dry_run, args.force);
+    let force = args.force;
 
     let mut nfo_written = 0;
     let mut nfo_skipped_existing = 0;
@@ -1251,102 +1418,47 @@ async fn handle_nfo_export(args: &NfoArgs) -> Result<()> {
         }
     }
 
+    let mut episode_tasks = JoinSet::new();
     for (video_path, parsed) in &parsed_files {
         let season = parsed
             .season_number
             .expect("collect_nfo_candidates ensures season");
-        let Some(episode) = episode_lookup.get(&(season, parsed.episode_number)) else {
-            println!(
-                "跳过缺少 TMDB 剧集元数据的文件: {}",
-                video_path.file_name().unwrap().to_string_lossy()
-            );
-            missing_metadata += 1;
-            continue;
-        };
+        let episode = episode_lookup
+            .get(&(season, parsed.episode_number))
+            .cloned();
+        let client = client.clone();
+        let language = args.language.clone();
+        let show_title = details.name.clone();
+        let video_path = video_path.clone();
+        let parsed = parsed.clone();
 
-        let episode_nfo_target = episode_nfo_path(video_path);
-        if should_write_path(&episode_nfo_target, args.force) {
-            let (external_ids_result, credits_result) = tokio::join!(
-                client.get_episode_external_ids(show_id, season, parsed.episode_number),
-                client.get_episode_credits(show_id, season, parsed.episode_number, &args.language)
-            );
-
-            let external_ids = match external_ids_result {
-                Ok(value) => Some(value),
-                Err(error) => {
-                    println!(
-                        "跳过单集外部 ID 增强: {} ({error})",
-                        video_path.file_name().unwrap().to_string_lossy()
-                    );
-                    metadata_enrichment_failures += 1;
-                    None
-                }
-            };
-
-            let credits = match credits_result {
-                Ok(value) => Some(value),
-                Err(error) => {
-                    println!(
-                        "跳过单集演职员增强: {} ({error})",
-                        video_path.file_name().unwrap().to_string_lossy()
-                    );
-                    metadata_enrichment_failures += 1;
-                    None
-                }
-            };
-
-            let episode_nfo = build_episode_nfo(
-                &details.name,
-                season,
-                parsed.episode_number,
+        episode_tasks.spawn(async move {
+            EpisodeExportJob {
+                client,
+                writer,
+                force,
+                language,
+                show_id,
+                show_title,
+                video_path,
+                parsed,
                 episode,
-                external_ids.as_ref(),
-                credits.as_ref(),
-            );
-            let outcome = writer.write_episode(video_path, &episode_nfo)?;
-            print_nfo_outcome(&outcome.path, outcome.action);
-            record_write_action(outcome.action, &mut nfo_written, &mut nfo_skipped_existing);
-        } else {
-            print_skipped_existing(
-                &episode_nfo_target,
-                &mut nfo_written,
-                &mut nfo_skipped_existing,
-            );
-        }
-
-        if let Some(still_path) = episode.still_path.as_deref() {
-            let extension = tmdb::image_extension(still_path);
-            let target_path = episode_thumb_image_path(video_path, extension);
-            if should_write_path(&target_path, args.force) {
-                match client.download_image(still_path).await {
-                    Ok(bytes) => {
-                        let outcome =
-                            writer.write_episode_thumb_image(video_path, extension, &bytes)?;
-                        print_nfo_outcome(&outcome.path, outcome.action);
-                        record_write_action(
-                            outcome.action,
-                            &mut image_written,
-                            &mut image_skipped_existing,
-                        );
-                    }
-                    Err(error) => {
-                        println!(
-                            "跳过单集缩略图下载失败: {} ({error})",
-                            video_path.file_name().unwrap().to_string_lossy()
-                        );
-                        image_failures += 1;
-                    }
-                }
-            } else {
-                print_skipped_existing(
-                    &target_path,
-                    &mut image_written,
-                    &mut image_skipped_existing,
-                );
             }
-        } else {
-            missing_images += 1;
-        }
+            .run()
+            .await
+        });
+    }
+
+    while let Some(result) = episode_tasks.join_next().await {
+        let stats = result.context("单集导出任务执行失败")??;
+        nfo_written += stats.nfo_written;
+        nfo_skipped_existing += stats.nfo_skipped_existing;
+        image_written += stats.image_written;
+        image_skipped_existing += stats.image_skipped_existing;
+        missing_images += stats.missing_images;
+        image_failures += stats.image_failures;
+        missing_metadata += stats.missing_metadata;
+        metadata_enrichment_failures += stats.metadata_enrichment_failures;
     }
 
     println!("\nNFO 导出摘要:");

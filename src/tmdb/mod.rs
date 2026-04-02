@@ -2,12 +2,15 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::env;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const DEFAULT_API_KEY: &str = "454dec4903d35bb318ab2ad9e578c615";
 const DEFAULT_BASE_URL: &str = "https://api.themoviedb.org";
 const API_VERSION_PATH: &str = "/3";
 const HTTP_TIMEOUT_SECONDS: u64 = 30;
+const MAX_CONCURRENT_REQUESTS: usize = 8;
 
 #[derive(Debug, Deserialize)]
 pub struct SearchResult {
@@ -137,10 +140,12 @@ pub struct NamedValue {
     pub name: String,
 }
 
+#[derive(Clone)]
 pub struct TmdbClient {
     client: reqwest::Client,
     api_key: String,
     base_url: String,
+    semaphore: Arc<Semaphore>,
 }
 
 impl TmdbClient {
@@ -149,10 +154,12 @@ impl TmdbClient {
             client: build_http_client(),
             api_key: resolve_api_key(),
             base_url: resolve_base_url(),
+            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
         }
     }
 
     pub async fn search_tv(&self, query: &str, language: &str) -> Result<Vec<TvShow>> {
+        let _permit = self.acquire_permit().await;
         let url = self.build_url("/search/tv");
 
         let response = self
@@ -175,6 +182,7 @@ impl TmdbClient {
     }
 
     pub async fn get_tv_details(&self, tv_id: u32, language: &str) -> Result<TvDetails> {
+        let _permit = self.acquire_permit().await;
         let url = self.build_url(&format!("/tv/{}", tv_id));
 
         let response = self
@@ -199,6 +207,7 @@ impl TmdbClient {
         season_number: u32,
         language: &str,
     ) -> Result<SeasonDetails> {
+        let _permit = self.acquire_permit().await;
         let url = self.build_url(&format!("/tv/{}/season/{}", tv_id, season_number));
 
         let response = self
@@ -217,6 +226,7 @@ impl TmdbClient {
     }
 
     pub async fn download_image(&self, file_path: &str) -> Result<Vec<u8>> {
+        let _permit = self.acquire_permit().await;
         let response = self
             .client
             .get(self.build_image_url(file_path))
@@ -238,6 +248,7 @@ impl TmdbClient {
         episode_number: u32,
         language: &str,
     ) -> Result<EpisodeCredits> {
+        let _permit = self.acquire_permit().await;
         let url = self.build_url(&format!(
             "/tv/{}/season/{}/episode/{}/credits",
             tv_id, season_number, episode_number
@@ -267,6 +278,7 @@ impl TmdbClient {
         season_number: u32,
         episode_number: u32,
     ) -> Result<EpisodeExternalIds> {
+        let _permit = self.acquire_permit().await;
         let url = self.build_url(&format!(
             "/tv/{}/season/{}/episode/{}/external_ids",
             tv_id, season_number, episode_number
@@ -296,6 +308,14 @@ impl TmdbClient {
 
     fn build_image_url(&self, file_path: &str) -> String {
         format!("https://image.tmdb.org/t/p/original{}", file_path)
+    }
+
+    async fn acquire_permit(&self) -> OwnedSemaphorePermit {
+        self.semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("TMDB 并发信号量已关闭")
     }
 }
 
@@ -385,6 +405,7 @@ mod tests {
             client: reqwest::Client::new(),
             api_key: "key".to_string(),
             base_url: "https://example.com/tmdb".to_string(),
+            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
         };
 
         assert_eq!(
@@ -399,6 +420,7 @@ mod tests {
             client: reqwest::Client::new(),
             api_key: "key".to_string(),
             base_url: resolve_base_url_from_env(Some("https://example.com/tmdb/3".to_string())),
+            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
         };
 
         assert_eq!(
@@ -519,6 +541,7 @@ mod tests {
             client: reqwest::Client::new(),
             api_key: "key".to_string(),
             base_url: "https://example.com/tmdb".to_string(),
+            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
         };
 
         assert_eq!(

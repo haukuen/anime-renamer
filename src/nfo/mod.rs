@@ -75,6 +75,7 @@ pub struct WriteOutcome {
     pub action: WriteAction,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct NfoWriter {
     dry_run: bool,
     force: bool,
