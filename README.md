@@ -23,34 +23,41 @@ cargo build --release
 ## 使用方法
 
 ```bash
-anime_renamer [OPTIONS] <PATH>
+anime_renamer [OPTIONS] [PATH]
 anime_renamer nfo [OPTIONS] <PATH>
 ```
 
-### 参数说明
+### 重命名选项
 
-| 参数 | 短参数 | 说明 | 默认值 |
+| 选项 | 短参数 | 说明 | 默认值 |
 |------|--------|------|--------|
 | `--recursive` | `-r` | 递归扫描子目录 | - |
 | `--dry-run` | `-n` | 预览模式（不实际重命名） | - |
 | `--name <NAME>` | - | 指定番剧名称（跳过自动识别） | - |
 | `--language <LANG>` | `-l` | 语言偏好 | `zh-CN` |
-| `--keep-tags` | - | 保留文件名中的标签（如 `[1080p]`） | - |
-| `--season-folders` | - | 为每季创建单独文件夹 | - |
-| `--use-anilist` | - | 使用 AniList API（更好的罗马音支持） | - |
+| `--keep-tags` | - | 保留所有标签 | - |
+| `--season-folders` | - | 为每一季创建单独的文件夹（Season 1, Season 2, ...） | - |
+| `--use-anilist` | - | 使用 AniList API 而不是 TMDB（更好的罗马音支持） | - |
 | `--season <N>` | `-s` | 手动指定季度（跳过自动映射） | - |
-| `--offset <N>` | `-o` | 集数偏移量（正数增加，负数减少） | `0` |
+| `--offset <N>` | `-o` | 集数偏移量 | `0` |
 | `--tmdb-id <ID>` | `-i` | 直接指定 TMDB ID | - |
 
-### NFO 导出参数
+### NFO 导出选项
 
-| 参数 | 短参数 | 说明 | 默认值 |
+| 选项 | 短参数 | 说明 | 默认值 |
 |------|--------|------|--------|
 | `--recursive` | `-r` | 递归扫描子目录 | - |
-| `--dry-run` | `-n` | 预览模式（不实际写入 NFO） | - |
+| `--dry-run` | `-n` | 预览模式（不实际写入） | - |
 | `--language <LANG>` | `-l` | 语言偏好 | `zh-CN` |
 | `--tmdb-id <ID>` | `-i` | 直接指定 TMDB ID | - |
 | `--force` | - | 覆盖已有 NFO 文件 | - |
+
+### 查看帮助
+
+```bash
+anime_renamer --help
+anime_renamer nfo --help
+```
 
 ### 常用示例
 
