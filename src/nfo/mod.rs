@@ -33,6 +33,16 @@ pub struct TvShowNfo {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SeasonNfo {
+    pub title: String,
+    pub plot: Option<String>,
+    pub premiered: Option<String>,
+    pub aired: Option<String>,
+    pub season: u32,
+    pub unique_ids: Vec<UniqueId>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct EpisodeNfo {
     pub title: String,
     pub showtitle: String,
@@ -93,6 +103,11 @@ impl NfoWriter {
 
     pub fn write_episode(&self, video_path: &Path, nfo: &EpisodeNfo) -> Result<WriteOutcome> {
         let path = episode_nfo_path(video_path);
+        self.write_file(&path, &nfo.render())
+    }
+
+    pub fn write_season(&self, season_dir: &Path, nfo: &SeasonNfo) -> Result<WriteOutcome> {
+        let path = season_nfo_path(season_dir);
         self.write_file(&path, &nfo.render())
     }
 
@@ -210,6 +225,23 @@ impl TvShowNfo {
     }
 }
 
+impl SeasonNfo {
+    pub fn render(&self) -> String {
+        let mut xml = String::new();
+        xml.push_str(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#);
+        xml.push('\n');
+        xml.push_str("<season>\n");
+        push_tag(&mut xml, "title", Some(self.title.as_str()), 1);
+        push_tag(&mut xml, "plot", self.plot.as_deref(), 1);
+        push_tag(&mut xml, "premiered", self.premiered.as_deref(), 1);
+        push_tag(&mut xml, "aired", self.aired.as_deref(), 1);
+        push_tag(&mut xml, "seasonnumber", Some(&self.season.to_string()), 1);
+        push_unique_ids(&mut xml, &self.unique_ids, 1);
+        xml.push_str("</season>\n");
+        xml
+    }
+}
+
 impl EpisodeNfo {
     pub fn render(&self) -> String {
         let mut xml = String::new();
@@ -243,6 +275,10 @@ pub fn tvshow_primary_image_path(root: &Path, extension: &str) -> PathBuf {
 
 pub fn tvshow_backdrop_image_path(root: &Path, extension: &str) -> PathBuf {
     root.join(format!("fanart.{}", normalize_extension(extension)))
+}
+
+pub fn season_nfo_path(season_dir: &Path) -> PathBuf {
+    season_dir.join("season.nfo")
 }
 
 pub fn season_primary_image_path(season_dir: &Path, extension: &str) -> PathBuf {
@@ -495,7 +531,7 @@ mod tests {
 
         assert!(xml.contains("<episodedetails>"));
         assert!(xml.contains("<showtitle>Series</showtitle>"));
-        assert!(xml.contains("<season>1</season>"));
+        assert!(xml.contains("<seasonnumber>1</seasonnumber>"));
         assert!(xml.contains("<episode>2</episode>"));
         assert!(xml.contains("<premiered>2024-02-03</premiered>"));
         assert!(xml.contains("<aired>2024-02-03</aired>"));
@@ -504,6 +540,89 @@ mod tests {
         assert!(xml.contains(r#"<director tmdbid="11">Director</director>"#));
         assert!(xml.contains("<actor>"));
         assert!(xml.contains("<type>GuestStar</type>"));
+    }
+
+    #[test]
+    fn test_season_render_contains_core_tags() {
+        let nfo = SeasonNfo {
+            title: "Season 1".to_string(),
+            plot: Some("Season overview".to_string()),
+            premiered: Some("2024-01-01".to_string()),
+            aired: Some("2024-01-01".to_string()),
+            season: 1,
+            unique_ids: vec![UniqueId {
+                id_type: "tmdb".to_string(),
+                value: "789".to_string(),
+                is_default: true,
+            }],
+        };
+
+        let xml = nfo.render();
+
+        assert!(xml.contains("<season>"));
+        assert!(xml.contains("</season>"));
+        assert!(xml.contains("<title>Season 1</title>"));
+        assert!(xml.contains("<plot>Season overview</plot>"));
+        assert!(xml.contains("<premiered>2024-01-01</premiered>"));
+        assert!(xml.contains("<aired>2024-01-01</aired>"));
+        assert!(xml.contains("<seasonnumber>1</seasonnumber>"));
+        assert!(xml.contains(r#"<uniqueid type="tmdb" default="true">789</uniqueid>"#));
+    }
+
+    #[test]
+    fn test_season_render_omits_optional_fields_when_absent() {
+        let nfo = SeasonNfo {
+            title: "Season 2".to_string(),
+            plot: None,
+            premiered: None,
+            aired: None,
+            season: 2,
+            unique_ids: vec![UniqueId {
+                id_type: "tmdb".to_string(),
+                value: "456".to_string(),
+                is_default: true,
+            }],
+        };
+
+        let xml = nfo.render();
+
+        assert!(xml.contains("<plot></plot>"));
+        assert!(xml.contains("<premiered></premiered>"));
+        assert!(xml.contains("<aired></aired>"));
+    }
+
+    #[test]
+    fn test_writer_write_season_creates_nfo_file() {
+        let dir = TestDir::new("season_nfo");
+        let season_dir = dir.path().join("Season 1");
+        fs::create_dir_all(&season_dir).unwrap();
+
+        let nfo = SeasonNfo {
+            title: "Season 1".to_string(),
+            plot: Some("Overview".to_string()),
+            premiered: Some("2024-01-01".to_string()),
+            aired: Some("2024-01-01".to_string()),
+            season: 1,
+            unique_ids: vec![UniqueId {
+                id_type: "tmdb".to_string(),
+                value: "123".to_string(),
+                is_default: true,
+            }],
+        };
+
+        let writer = NfoWriter::new(false, false);
+        let outcome = writer.write_season(&season_dir, &nfo).unwrap();
+
+        assert_eq!(outcome.action, WriteAction::Written);
+        let content = fs::read_to_string(season_dir.join("season.nfo")).unwrap();
+        assert!(content.contains("<season>"));
+        assert!(content.contains("<title>Season 1</title>"));
+    }
+
+    #[test]
+    fn test_season_nfo_path_returns_season_nfo_in_dir() {
+        let path = season_nfo_path(Path::new("/media/Show/Season 1"));
+        assert_eq!(path, Path::new("/media/Show/Season 1/season.nfo"));
     }
 
     #[test]

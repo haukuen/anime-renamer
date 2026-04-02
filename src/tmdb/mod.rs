@@ -69,7 +69,15 @@ pub struct Season {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct SeasonDetails {
+    #[serde(default)]
+    pub id: u32,
+    #[serde(default)]
+    pub name: String,
     pub season_number: u32,
+    #[serde(default)]
+    pub overview: Option<String>,
+    #[serde(default)]
+    pub air_date: Option<String>,
     #[serde(default)]
     pub poster_path: Option<String>,
     #[serde(default)]
@@ -474,7 +482,11 @@ mod tests {
     #[test]
     fn test_season_details_deserializes_optional_episode_fields() {
         let json = serde_json::json!({
+            "id": 456,
+            "name": "Season 1",
             "season_number": 1,
+            "overview": "Season overview",
+            "air_date": "2024-01-01",
             "poster_path": "/season-1.jpg",
             "episodes": [
                 {
@@ -492,7 +504,11 @@ mod tests {
 
         let details: SeasonDetails = serde_json::from_value(json).unwrap();
 
+        assert_eq!(details.id, 456);
+        assert_eq!(details.name, "Season 1");
         assert_eq!(details.season_number, 1);
+        assert_eq!(details.overview.as_deref(), Some("Season overview"));
+        assert_eq!(details.air_date.as_deref(), Some("2024-01-01"));
         assert_eq!(details.poster_path.as_deref(), Some("/season-1.jpg"));
         assert_eq!(details.episodes[0].id, 987);
         assert_eq!(

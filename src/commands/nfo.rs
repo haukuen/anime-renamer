@@ -1,8 +1,8 @@
 use crate::cli::NfoArgs;
 use crate::nfo::{
-    ActorNfo, EpisodeNfo, NfoWriter, PersonNfo, Rating, TvShowNfo, UniqueId, WriteAction,
-    episode_nfo_path, episode_thumb_image_path, season_primary_image_path,
-    tvshow_backdrop_image_path, tvshow_primary_image_path,
+    ActorNfo, EpisodeNfo, NfoWriter, PersonNfo, Rating, SeasonNfo, TvShowNfo, UniqueId,
+    WriteAction, episode_nfo_path, episode_thumb_image_path, season_nfo_path,
+    season_primary_image_path, tvshow_backdrop_image_path, tvshow_primary_image_path,
 };
 use crate::parser::{EpisodeType, FileParser, ParsedFile, extract_tmdb_id};
 use crate::scanner::FileScanner;
@@ -396,6 +396,24 @@ fn build_tvshow_nfo(details: &TvDetails) -> TvShowNfo {
     }
 }
 
+fn build_season_nfo(details: &SeasonDetails) -> SeasonNfo {
+    SeasonNfo {
+        title: details.name.clone(),
+        plot: details
+            .overview
+            .clone()
+            .filter(|value| !value.trim().is_empty()),
+        premiered: details.air_date.clone(),
+        aired: details.air_date.clone(),
+        season: details.season_number,
+        unique_ids: vec![UniqueId {
+            id_type: "tmdb".to_string(),
+            value: details.id.to_string(),
+            is_default: true,
+        }],
+    }
+}
+
 fn build_episode_nfo(
     show_title: &str,
     season_number: u32,
@@ -716,6 +734,30 @@ pub(crate) async fn run(args: &NfoArgs) -> Result<()> {
         let Some(target_dirs) = season_targets.get(season) else {
             continue;
         };
+
+        // Write season.nfo for each season directory
+        if let Some(season_detail) = season_details_map.get(season) {
+            let season_nfo = build_season_nfo(season_detail);
+            for target_dir in target_dirs {
+                let nfo_target = season_nfo_path(target_dir);
+                if should_write_path(&nfo_target, args.force) {
+                    let outcome = writer.write_season(target_dir, &season_nfo)?;
+                    print_nfo_outcome(&outcome.path, outcome.action);
+                    record_write_action(
+                        outcome.action,
+                        &mut nfo_written,
+                        &mut nfo_skipped_existing,
+                    );
+                } else {
+                    print_skipped_existing(
+                        &nfo_target,
+                        &mut nfo_written,
+                        &mut nfo_skipped_existing,
+                    );
+                }
+            }
+        }
+
         let Some(poster_path) = resolve_season_poster_path(*season, &season_details_map, &details)
         else {
             missing_images += target_dirs.len();
@@ -916,7 +958,11 @@ mod tests {
 
     fn make_season_details(season_number: u32, poster_path: Option<&str>) -> SeasonDetails {
         SeasonDetails {
+            id: 0,
+            name: format!("Season {}", season_number),
             season_number,
+            overview: None,
+            air_date: None,
             poster_path: poster_path.map(str::to_string),
             episodes: Vec::new(),
         }
