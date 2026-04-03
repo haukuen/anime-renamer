@@ -54,7 +54,7 @@ impl FileScanner {
             None => return subtitles,
         };
 
-        let video_stem = match video_path.file_stem().and_then(|s| s.to_str()) {
+        let video_stem = match file_stem_lossy(video_path) {
             Some(s) => s,
             None => return subtitles,
         };
@@ -66,16 +66,18 @@ impl FileScanner {
                     continue;
                 }
 
-                let filename = match path.file_name().and_then(|s| s.to_str()) {
+                let filename = match file_name_lossy(&path) {
                     Some(s) => s,
                     None => continue,
                 };
 
-                if !filename.starts_with(video_stem) {
+                if !filename.starts_with(&video_stem) {
                     continue;
                 }
 
-                let suffix = &filename[video_stem.len()..];
+                let Some(suffix) = filename.strip_prefix(&video_stem) else {
+                    continue;
+                };
 
                 let is_subtitle = SUBTITLE_EXTENSIONS
                     .iter()
@@ -96,15 +98,25 @@ impl FileScanner {
         old_video_stem: &str,
         new_video_path: &Path,
     ) -> Option<PathBuf> {
-        let subtitle_filename = subtitle_path.file_name()?.to_str()?;
-        let new_video_stem = new_video_path.file_stem()?.to_str()?;
+        let subtitle_filename = file_name_lossy(subtitle_path)?;
+        let new_video_stem = file_stem_lossy(new_video_path)?;
         let new_parent = new_video_path.parent()?;
 
-        let suffix = &subtitle_filename[old_video_stem.len()..];
+        let suffix = subtitle_filename.strip_prefix(old_video_stem)?;
         let new_subtitle_filename = format!("{}{}", new_video_stem, suffix);
 
         Some(new_parent.join(new_subtitle_filename))
     }
+}
+
+fn file_name_lossy(path: &Path) -> Option<String> {
+    path.file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
+fn file_stem_lossy(path: &Path) -> Option<String> {
+    path.file_stem()
+        .map(|value| value.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

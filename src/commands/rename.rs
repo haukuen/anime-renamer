@@ -3,11 +3,34 @@ use crate::cli::RenameArgs;
 use crate::parser::{EpisodeType, FileParser, ParsedFile, extract_tmdb_id};
 use crate::scanner::FileScanner;
 use crate::tmdb::{Season, TmdbClient, TvDetails};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 type ParsedEntry = (PathBuf, ParsedFile);
 type RenameEntry = (PathBuf, PathBuf, u32, u32);
+static TEMP_RENAME_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenameKind {
+    Video,
+    Subtitle,
+}
+
+#[derive(Debug, Clone)]
+struct RenameOperation {
+    source: PathBuf,
+    target: PathBuf,
+    kind: RenameKind,
+}
+
+#[derive(Debug, Clone)]
+struct StagedRename {
+    operation: RenameOperation,
+    temp_path: PathBuf,
+}
 
 fn apply_offset(episode: u32, offset: i32) -> u32 {
     (episode as i32 + offset).max(1) as u32
@@ -68,6 +91,11 @@ fn display_file_name(path: &Path) -> String {
     file_name_lossy(path).unwrap_or_else(|| path.display().to_string())
 }
 
+fn file_stem_lossy(path: &Path) -> Option<String> {
+    path.file_stem()
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
 fn print_rename_preview(rename_map: &[RenameEntry], season_folders: bool) {
     println!("重命名预览:\n");
     for (i, (old_path, new_path, season, episode)) in rename_map.iter().enumerate() {
@@ -87,12 +115,12 @@ fn print_rename_preview(rename_map: &[RenameEntry], season_folders: bool) {
 
         let subtitles = FileScanner::find_associated_subtitles(old_path);
         if !subtitles.is_empty() {
-            let old_stem = old_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let old_stem = file_stem_lossy(old_path).unwrap_or_default();
             let suffixes: Vec<String> = subtitles
                 .iter()
                 .filter_map(|p| {
-                    let name = p.file_name()?.to_str()?;
-                    Some(name[old_stem.len()..].to_string())
+                    let name = p.file_name()?.to_string_lossy().into_owned();
+                    Some(name.strip_prefix(&old_stem)?.to_string())
                 })
                 .collect();
             println!("  字幕: {}", suffixes.join(", "));
@@ -101,8 +129,211 @@ fn print_rename_preview(rename_map: &[RenameEntry], season_folders: bool) {
     }
 }
 
+fn build_rename_operations(rename_map: &[RenameEntry]) -> Vec<RenameOperation> {
+    let mut operations = Vec::new();
+
+    for (old_path, new_path, _, _) in rename_map {
+        if old_path != new_path {
+            operations.push(RenameOperation {
+                source: old_path.clone(),
+                target: new_path.clone(),
+                kind: RenameKind::Video,
+            });
+        }
+
+        let old_video_stem = file_stem_lossy(old_path).unwrap_or_default();
+        let subtitles = FileScanner::find_associated_subtitles(old_path);
+        for subtitle_path in subtitles {
+            let Some(new_subtitle_path) =
+                FileScanner::compute_subtitle_new_path(&subtitle_path, &old_video_stem, new_path)
+            else {
+                continue;
+            };
+
+            if subtitle_path != new_subtitle_path {
+                operations.push(RenameOperation {
+                    source: subtitle_path,
+                    target: new_subtitle_path,
+                    kind: RenameKind::Subtitle,
+                });
+            }
+        }
+    }
+
+    operations
+}
+
+fn validate_rename_operations(operations: &[RenameOperation]) -> Result<()> {
+    let mut targets: HashMap<&Path, Vec<&Path>> = HashMap::new();
+    let sources: HashSet<&Path> = operations
+        .iter()
+        .map(|operation| operation.source.as_path())
+        .collect();
+
+    for operation in operations {
+        targets
+            .entry(operation.target.as_path())
+            .or_default()
+            .push(operation.source.as_path());
+    }
+
+    for (target, sources_for_target) in targets {
+        if sources_for_target.len() > 1 {
+            let joined_sources = sources_for_target
+                .iter()
+                .map(|source| source.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "多个文件将重命名为同一目标 {}: {}",
+                target.display(),
+                joined_sources
+            );
+        }
+
+        if target.exists() && !sources.contains(target) {
+            bail!("目标文件已存在: {}", target.display());
+        }
+    }
+
+    for operation in operations {
+        if !operation.source.exists() {
+            bail!("源文件不存在: {}", operation.source.display());
+        }
+    }
+
+    Ok(())
+}
+
+fn temporary_rename_path(source: &Path, index: usize) -> PathBuf {
+    let unique = TEMP_RENAME_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    let file_name = display_file_name(source);
+
+    source.with_file_name(format!(
+        ".anime-renamer-tmp-{nanos}-{unique}-{index}-{file_name}"
+    ))
+}
+
+fn rollback_rename_operations(
+    staged: &[StagedRename],
+    finalized_count: usize,
+    failed_index: usize,
+) -> Result<()> {
+    for staged_rename in staged[..finalized_count].iter().rev() {
+        if staged_rename.operation.target.exists() {
+            std::fs::rename(
+                &staged_rename.operation.target,
+                &staged_rename.operation.source,
+            )
+            .with_context(|| {
+                format!(
+                    "回滚失败: {} -> {}",
+                    staged_rename.operation.target.display(),
+                    staged_rename.operation.source.display()
+                )
+            })?;
+        }
+    }
+
+    for staged_rename in &staged[failed_index..] {
+        if staged_rename.temp_path.exists() {
+            std::fs::rename(&staged_rename.temp_path, &staged_rename.operation.source)
+                .with_context(|| {
+                    format!(
+                        "回滚失败: {} -> {}",
+                        staged_rename.temp_path.display(),
+                        staged_rename.operation.source.display()
+                    )
+                })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn execute_rename_operations(operations: &[RenameOperation]) -> Result<(usize, usize)> {
+    let mut staged = Vec::with_capacity(operations.len());
+
+    for (index, operation) in operations.iter().enumerate() {
+        let temp_path = temporary_rename_path(&operation.source, index);
+        if let Err(error) = std::fs::rename(&operation.source, &temp_path) {
+            rollback_rename_operations(&staged, 0, 0).context(format!(
+                "暂存重命名失败且回滚未完成: {} -> {} ({error})",
+                operation.source.display(),
+                temp_path.display()
+            ))?;
+            bail!(
+                "暂存重命名失败，已回滚: {} -> {} ({error})",
+                operation.source.display(),
+                temp_path.display()
+            );
+        }
+        staged.push(StagedRename {
+            operation: operation.clone(),
+            temp_path,
+        });
+    }
+
+    let mut video_success = 0;
+    let mut subtitle_success = 0;
+
+    for (index, staged_rename) in staged.iter().enumerate() {
+        if let Some(parent_dir) = staged_rename.operation.target.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent_dir) {
+                rollback_rename_operations(&staged, index, index).context(format!(
+                    "创建目录失败且回滚未完成: {} ({error})",
+                    parent_dir.display()
+                ))?;
+                bail!("创建目录失败，已回滚: {} ({error})", parent_dir.display());
+            }
+        }
+
+        if staged_rename.operation.target.exists() {
+            if let Err(error) = std::fs::remove_file(&staged_rename.operation.target) {
+                rollback_rename_operations(&staged, index, index).context(format!(
+                    "移除已存在目标失败且回滚未完成: {} ({error})",
+                    staged_rename.operation.target.display()
+                ))?;
+                bail!(
+                    "移除已存在目标失败，已回滚: {} ({error})",
+                    staged_rename.operation.target.display()
+                );
+            }
+        }
+
+        if let Err(error) =
+            std::fs::rename(&staged_rename.temp_path, &staged_rename.operation.target)
+        {
+            rollback_rename_operations(&staged, index, index).context(format!(
+                "执行重命名失败且回滚未完成: {} -> {} ({error})",
+                staged_rename.temp_path.display(),
+                staged_rename.operation.target.display()
+            ))?;
+            bail!(
+                "执行重命名失败，已回滚: {} -> {} ({error})",
+                staged_rename.operation.source.display(),
+                staged_rename.operation.target.display()
+            );
+        }
+
+        match staged_rename.operation.kind {
+            RenameKind::Video => video_success += 1,
+            RenameKind::Subtitle => subtitle_success += 1,
+        }
+    }
+
+    Ok((video_success, subtitle_success))
+}
+
 fn execute_rename(rename_map: &[RenameEntry], dry_run: bool) -> Result<()> {
     use std::io::{self, Write};
+
+    let operations = build_rename_operations(rename_map);
+    validate_rename_operations(&operations)?;
 
     if dry_run {
         println!("预览模式，未实际重命名");
@@ -120,46 +351,7 @@ fn execute_rename(rename_map: &[RenameEntry], dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut video_success = 0;
-    let mut subtitle_success = 0;
-
-    for (old_path, new_path, _, _) in rename_map {
-        if let Some(parent_dir) = new_path.parent()
-            && !parent_dir.exists()
-            && let Err(e) = std::fs::create_dir_all(parent_dir)
-        {
-            println!("创建目录失败: {} - {}", parent_dir.display(), e);
-            continue;
-        }
-
-        let old_video_stem = old_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let subtitles = FileScanner::find_associated_subtitles(old_path);
-
-        if let Err(e) = std::fs::rename(old_path, new_path) {
-            println!("重命名失败: {} - {}", old_path.display(), e);
-            continue;
-        }
-        video_success += 1;
-
-        for subtitle_path in &subtitles {
-            if let Some(new_subtitle_path) =
-                FileScanner::compute_subtitle_new_path(subtitle_path, old_video_stem, new_path)
-            {
-                if let Err(e) = std::fs::rename(subtitle_path, &new_subtitle_path) {
-                    println!(
-                        "字幕重命名失败: {} - {}",
-                        subtitle_path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy(),
-                        e
-                    );
-                } else {
-                    subtitle_success += 1;
-                }
-            }
-        }
-    }
+    let (video_success, subtitle_success) = execute_rename_operations(&operations)?;
 
     println!("\n成功重命名 {} 个视频文件", video_success);
     if subtitle_success > 0 {
@@ -565,5 +757,65 @@ mod tests {
         let result = compute_season_episode(&EpisodeType::Movie, 1, None, None, 0, &seasons);
 
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_validate_rename_operations_rejects_duplicate_targets() {
+        let operations = vec![
+            RenameOperation {
+                source: PathBuf::from("/tmp/a.mkv"),
+                target: PathBuf::from("/tmp/output.mkv"),
+                kind: RenameKind::Video,
+            },
+            RenameOperation {
+                source: PathBuf::from("/tmp/b.mkv"),
+                target: PathBuf::from("/tmp/output.mkv"),
+                kind: RenameKind::Video,
+            },
+        ];
+
+        let error = validate_rename_operations(&operations).unwrap_err();
+
+        assert!(error.to_string().contains("同一目标"));
+    }
+
+    #[test]
+    fn test_execute_rename_operations_handles_swapped_names() {
+        let dir = std::env::temp_dir().join(format!(
+            "rename_swap_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let first = dir.join("first.mkv");
+        let second = dir.join("second.mkv");
+        std::fs::write(&first, b"one").unwrap();
+        std::fs::write(&second, b"two").unwrap();
+
+        let operations = vec![
+            RenameOperation {
+                source: first.clone(),
+                target: second.clone(),
+                kind: RenameKind::Video,
+            },
+            RenameOperation {
+                source: second.clone(),
+                target: first.clone(),
+                kind: RenameKind::Video,
+            },
+        ];
+
+        let (video_success, subtitle_success) = execute_rename_operations(&operations).unwrap();
+
+        assert_eq!(video_success, 2);
+        assert_eq!(subtitle_success, 0);
+        assert_eq!(std::fs::read(&first).unwrap(), b"two");
+        assert_eq!(std::fs::read(&second).unwrap(), b"one");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

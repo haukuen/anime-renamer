@@ -1,6 +1,10 @@
 use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static TEMP_WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rating {
@@ -178,13 +182,34 @@ impl NfoWriter {
             fs::create_dir_all(parent)?;
         }
 
-        fs::write(path, bytes)?;
+        let temp_path = temporary_write_path(path);
+        fs::write(&temp_path, bytes)?;
+
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+
+        fs::rename(&temp_path, path)?;
 
         Ok(WriteOutcome {
             path: path.to_path_buf(),
             action: WriteAction::Written,
         })
     }
+}
+
+fn temporary_write_path(path: &Path) -> PathBuf {
+    let unique = TEMP_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    let file_name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "nfo.tmp".to_string());
+
+    path.with_file_name(format!(".anime-renamer-write-{nanos}-{unique}-{file_name}"))
 }
 
 impl TvShowNfo {

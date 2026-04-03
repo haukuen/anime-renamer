@@ -146,17 +146,9 @@ impl FileParser {
         // 移除括号及其内容（通常是总集数）
         name = self.paren_regex.replace_all(&name, " ").to_string();
 
-        if let Some(pos) = name.find('：') {
-            name = name[..pos].to_string();
-        }
-
-        if let Some(pos) = name.find(':') {
-            name = name[..pos].to_string();
-        }
-
         name = name
             .trim()
-            .trim_matches(|c| c == '-' || c == '_' || c == '.')
+            .trim_matches(|c| c == '-' || c == '_' || c == '.' || c == ':' || c == '：')
             .trim()
             .to_string();
 
@@ -315,6 +307,15 @@ mod tests {
         assert_eq!(result.season_number, Some(2));
         assert_eq!(result.episode_number, 220);
         assert!(result.is_already_formatted);
+    }
+
+    #[test]
+    fn test_parse_preserves_colon_in_title() {
+        let parser = FileParser::new();
+        let result = parser.parse("JOJO的奇妙冒险：石之海 - 01.mkv").unwrap();
+
+        assert_eq!(result.anime_name, "JOJO的奇妙冒险：石之海");
+        assert_eq!(result.episode_number, 1);
     }
 
     #[test]
