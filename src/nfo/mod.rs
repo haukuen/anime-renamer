@@ -531,7 +531,7 @@ mod tests {
 
         assert!(xml.contains("<episodedetails>"));
         assert!(xml.contains("<showtitle>Series</showtitle>"));
-        assert!(xml.contains("<seasonnumber>1</seasonnumber>"));
+        assert!(xml.contains("<season>1</season>"));
         assert!(xml.contains("<episode>2</episode>"));
         assert!(xml.contains("<premiered>2024-02-03</premiered>"));
         assert!(xml.contains("<aired>2024-02-03</aired>"));
