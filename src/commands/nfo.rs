@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use tokio::task::JoinSet;
 
 type ParsedEntry = (PathBuf, ParsedFile);
+const MAX_CONCURRENT_EPISODE_EXPORTS: usize = tmdb::MAX_CONCURRENT_REQUESTS;
 
 fn file_name_lossy(path: &Path) -> Option<String> {
     path.file_name()
@@ -523,12 +524,13 @@ impl EpisodeExportJob {
 
         let episode_nfo_target = episode_nfo_path(&video_path);
         if should_write_path(&episode_nfo_target, force) {
-            let (external_ids_result, credits_result) = tokio::join!(
-                client.get_episode_external_ids(show_id, season, parsed.episode_number),
-                client.get_episode_credits(show_id, season, parsed.episode_number, &language)
-            );
-
-            let external_ids = match external_ids_result {
+            // Keep one TMDB request in flight per episode job. Running both calls at once causes
+            // the shared request semaphore to complete work in small bursts (for example 4 episodes
+            // at a time with an 8-request limit), which makes NFO output look "stuck" between batches.
+            let external_ids = match client
+                .get_episode_external_ids(show_id, season, parsed.episode_number)
+                .await
+            {
                 Ok(value) => Some(value),
                 Err(error) => {
                     println!(
@@ -540,7 +542,10 @@ impl EpisodeExportJob {
                 }
             };
 
-            let credits = match credits_result {
+            let credits = match client
+                .get_episode_credits(show_id, season, parsed.episode_number, &language)
+                .await
+            {
                 Ok(value) => Some(value),
                 Err(error) => {
                     println!(
@@ -597,6 +602,41 @@ impl EpisodeExportJob {
 
         Ok(stats)
     }
+}
+
+fn spawn_episode_export_job(
+    episode_tasks: &mut JoinSet<Result<EpisodeExportStats>>,
+    client: &TmdbClient,
+    writer: NfoWriter,
+    force: bool,
+    language: &str,
+    show_id: u32,
+    show_title: &str,
+    video_path: &Path,
+    parsed: &ParsedFile,
+    episode: Option<Episode>,
+) {
+    let client = client.clone();
+    let language = language.to_string();
+    let show_title = show_title.to_string();
+    let video_path = video_path.to_path_buf();
+    let parsed = parsed.clone();
+
+    episode_tasks.spawn(async move {
+        EpisodeExportJob {
+            client,
+            writer,
+            force,
+            language,
+            show_id,
+            show_title,
+            video_path,
+            parsed,
+            episode,
+        }
+        .run()
+        .await
+    });
 }
 
 pub(crate) async fn run(args: &NfoArgs) -> Result<()> {
@@ -804,34 +844,30 @@ pub(crate) async fn run(args: &NfoArgs) -> Result<()> {
     }
 
     let mut episode_tasks = JoinSet::new();
-    for (video_path, parsed) in &parsed_files {
+    let mut parsed_iter = parsed_files.iter();
+
+    while episode_tasks.len() < MAX_CONCURRENT_EPISODE_EXPORTS {
+        let Some((video_path, parsed)) = parsed_iter.next() else {
+            break;
+        };
         let season = parsed
             .season_number
             .expect("collect_nfo_candidates ensures season");
         let episode = episode_lookup
             .get(&(season, parsed.episode_number))
             .cloned();
-        let client = client.clone();
-        let language = args.language.clone();
-        let show_title = details.name.clone();
-        let video_path = video_path.clone();
-        let parsed = parsed.clone();
-
-        episode_tasks.spawn(async move {
-            EpisodeExportJob {
-                client,
-                writer,
-                force,
-                language,
-                show_id,
-                show_title,
-                video_path,
-                parsed,
-                episode,
-            }
-            .run()
-            .await
-        });
+        spawn_episode_export_job(
+            &mut episode_tasks,
+            &client,
+            writer,
+            force,
+            &args.language,
+            show_id,
+            &details.name,
+            video_path,
+            parsed,
+            episode,
+        );
     }
 
     while let Some(result) = episode_tasks.join_next().await {
@@ -844,6 +880,27 @@ pub(crate) async fn run(args: &NfoArgs) -> Result<()> {
         image_failures += stats.image_failures;
         missing_metadata += stats.missing_metadata;
         metadata_enrichment_failures += stats.metadata_enrichment_failures;
+
+        if let Some((video_path, parsed)) = parsed_iter.next() {
+            let season = parsed
+                .season_number
+                .expect("collect_nfo_candidates ensures season");
+            let episode = episode_lookup
+                .get(&(season, parsed.episode_number))
+                .cloned();
+            spawn_episode_export_job(
+                &mut episode_tasks,
+                &client,
+                writer,
+                force,
+                &args.language,
+                show_id,
+                &details.name,
+                video_path,
+                parsed,
+                episode,
+            );
+        }
     }
 
     println!("\nNFO 导出摘要:");

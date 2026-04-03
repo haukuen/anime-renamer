@@ -10,7 +10,7 @@ const DEFAULT_API_KEY: &str = "454dec4903d35bb318ab2ad9e578c615";
 const DEFAULT_BASE_URL: &str = "https://api.themoviedb.org";
 const API_VERSION_PATH: &str = "/3";
 const HTTP_TIMEOUT_SECONDS: u64 = 30;
-const MAX_CONCURRENT_REQUESTS: usize = 8;
+pub(crate) const MAX_CONCURRENT_REQUESTS: usize = 8;
 
 #[derive(Debug, Deserialize)]
 pub struct SearchResult {
