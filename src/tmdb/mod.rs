@@ -191,7 +191,7 @@ impl TmdbClient {
 
     pub async fn get_tv_details(&self, tv_id: u32, language: &str) -> Result<TvDetails> {
         let _permit = self.acquire_permit().await;
-        let url = self.build_url(&format!("/tv/{}", tv_id));
+        let url = self.build_url(&format!("/tv/{tv_id}"));
 
         let response = self
             .client
@@ -216,7 +216,7 @@ impl TmdbClient {
         language: &str,
     ) -> Result<SeasonDetails> {
         let _permit = self.acquire_permit().await;
-        let url = self.build_url(&format!("/tv/{}/season/{}", tv_id, season_number));
+        let url = self.build_url(&format!("/tv/{tv_id}/season/{season_number}"));
 
         let response = self
             .client
@@ -258,8 +258,7 @@ impl TmdbClient {
     ) -> Result<EpisodeCredits> {
         let _permit = self.acquire_permit().await;
         let url = self.build_url(&format!(
-            "/tv/{}/season/{}/episode/{}/credits",
-            tv_id, season_number, episode_number
+            "/tv/{tv_id}/season/{season_number}/episode/{episode_number}/credits"
         ));
 
         let response = self
@@ -288,8 +287,7 @@ impl TmdbClient {
     ) -> Result<EpisodeExternalIds> {
         let _permit = self.acquire_permit().await;
         let url = self.build_url(&format!(
-            "/tv/{}/season/{}/episode/{}/external_ids",
-            tv_id, season_number, episode_number
+            "/tv/{tv_id}/season/{season_number}/episode/{episode_number}/external_ids"
         ));
 
         let response = self
@@ -315,7 +313,7 @@ impl TmdbClient {
     }
 
     fn build_image_url(&self, file_path: &str) -> String {
-        format!("https://image.tmdb.org/t/p/original{}", file_path)
+        format!("https://image.tmdb.org/t/p/original{file_path}")
     }
 
     async fn acquire_permit(&self) -> OwnedSemaphorePermit {

@@ -33,16 +33,16 @@ fn collect_nfo_candidates(files: &[PathBuf], parser: &FileParser) -> Vec<ParsedE
 
         match parser.parse(&filename) {
             Some(parsed) if !parsed.is_already_formatted => {
-                println!("跳过非规范命名文件: {}", filename);
+                println!("跳过非规范命名文件: {filename}");
             }
             Some(parsed) if parsed.episode_type == EpisodeType::Movie => {
-                println!("跳过剧场版: {}", filename);
+                println!("跳过剧场版: {filename}");
             }
             Some(parsed) => match parsed.season_number {
                 Some(_) => parsed_files.push((file.clone(), parsed)),
-                None => println!("跳过缺少季度信息的文件: {}", filename),
+                None => println!("跳过缺少季度信息的文件: {filename}"),
             },
-            None => println!("无法解析: {}", filename),
+            None => println!("无法解析: {filename}"),
         }
     }
 
@@ -154,7 +154,7 @@ async fn fetch_season_details_map(
                 season_details.insert(details.season_number, details);
             }
             Err(error) => {
-                println!("跳过第 {} 季元数据: {error}", season);
+                println!("跳过第 {season} 季元数据: {error}");
                 failed_seasons.push(season);
             }
         }
@@ -368,6 +368,8 @@ fn build_episode_actors(credits: Option<&EpisodeCredits>) -> Vec<ActorNfo> {
 }
 
 fn build_tvshow_nfo(details: &TvDetails) -> TvShowNfo {
+    let tmdb_id = details.id;
+
     TvShowNfo {
         title: details.name.clone(),
         plot: details
@@ -393,7 +395,7 @@ fn build_tvshow_nfo(details: &TvDetails) -> TvShowNfo {
             .map(|genre| genre.name.clone())
             .collect(),
         studios: collect_studios(details),
-        episodeguide: format!(r#"{{"tmdb":"{}"}}"#, details.id),
+        episodeguide: format!(r#"{{"tmdb":"{tmdb_id}"}}"#),
     }
 }
 
@@ -449,7 +451,7 @@ fn print_nfo_outcome(path: &Path, action: WriteAction) {
         WriteAction::SkippedExisting => "已跳过（文件已存在）",
     };
 
-    println!("{}: {}", label, path.display());
+    println!("{label}: {}", path.display());
 }
 
 #[derive(Default)]
@@ -492,6 +494,16 @@ struct EpisodeExportJob {
     video_path: PathBuf,
     parsed: ParsedFile,
     episode: Option<Episode>,
+}
+
+#[derive(Clone)]
+struct EpisodeExportShared {
+    client: TmdbClient,
+    writer: NfoWriter,
+    force: bool,
+    language: String,
+    show_id: u32,
+    show_title: String,
 }
 
 impl EpisodeExportJob {
@@ -606,30 +618,23 @@ impl EpisodeExportJob {
 
 fn spawn_episode_export_job(
     episode_tasks: &mut JoinSet<Result<EpisodeExportStats>>,
-    client: &TmdbClient,
-    writer: NfoWriter,
-    force: bool,
-    language: &str,
-    show_id: u32,
-    show_title: &str,
+    shared: &EpisodeExportShared,
     video_path: &Path,
     parsed: &ParsedFile,
     episode: Option<Episode>,
 ) {
-    let client = client.clone();
-    let language = language.to_string();
-    let show_title = show_title.to_string();
+    let shared = shared.clone();
     let video_path = video_path.to_path_buf();
     let parsed = parsed.clone();
 
     episode_tasks.spawn(async move {
         EpisodeExportJob {
-            client,
-            writer,
-            force,
-            language,
-            show_id,
-            show_title,
+            client: shared.client,
+            writer: shared.writer,
+            force: shared.force,
+            language: shared.language,
+            show_id: shared.show_id,
+            show_title: shared.show_title,
             video_path,
             parsed,
             episode,
@@ -661,7 +666,7 @@ pub(crate) async fn run(args: &NfoArgs) -> Result<()> {
     }
 
     let anime_name = parsed_files[0].1.anime_name.clone();
-    println!("检测到番剧: {}", anime_name);
+    println!("检测到番剧: {anime_name}");
 
     let client = TmdbClient::new();
     let (show_id, details) = resolve_tmdb_details(
@@ -681,14 +686,23 @@ pub(crate) async fn run(args: &NfoArgs) -> Result<()> {
     let episode_lookup = build_episode_lookup(&season_details_map);
     let season_targets = season_image_targets(&parsed_files);
     let writer = NfoWriter::new(args.dry_run, args.force);
-    let force = args.force;
+    let shared = EpisodeExportShared {
+        client: client.clone(),
+        writer,
+        force: args.force,
+        language: args.language.clone(),
+        show_id,
+        show_title: details.name.clone(),
+    };
 
     let mut nfo_written = 0;
     let mut nfo_skipped_existing = 0;
     let root = Path::new(&args.path);
     let tvshow_nfo_path = root.join("tvshow.nfo");
     if should_write_path(&tvshow_nfo_path, args.force) {
-        let tvshow_outcome = writer.write_tvshow(root, &build_tvshow_nfo(&details))?;
+        let tvshow_outcome = shared
+            .writer
+            .write_tvshow(root, &build_tvshow_nfo(&details))?;
         print_nfo_outcome(&tvshow_outcome.path, tvshow_outcome.action);
         record_write_action(
             tvshow_outcome.action,
@@ -716,7 +730,9 @@ pub(crate) async fn run(args: &NfoArgs) -> Result<()> {
         if should_write_path(&target_path, args.force) {
             match client.download_image(poster_path).await {
                 Ok(bytes) => {
-                    let outcome = writer.write_tvshow_primary_image(root, extension, &bytes)?;
+                    let outcome = shared
+                        .writer
+                        .write_tvshow_primary_image(root, extension, &bytes)?;
                     print_nfo_outcome(&outcome.path, outcome.action);
                     record_write_action(
                         outcome.action,
@@ -746,7 +762,9 @@ pub(crate) async fn run(args: &NfoArgs) -> Result<()> {
         if should_write_path(&target_path, args.force) {
             match client.download_image(backdrop_path).await {
                 Ok(bytes) => {
-                    let outcome = writer.write_tvshow_backdrop_image(root, extension, &bytes)?;
+                    let outcome = shared
+                        .writer
+                        .write_tvshow_backdrop_image(root, extension, &bytes)?;
                     print_nfo_outcome(&outcome.path, outcome.action);
                     record_write_action(
                         outcome.action,
@@ -781,7 +799,7 @@ pub(crate) async fn run(args: &NfoArgs) -> Result<()> {
             for target_dir in target_dirs {
                 let nfo_target = season_nfo_path(target_dir);
                 if should_write_path(&nfo_target, args.force) {
-                    let outcome = writer.write_season(target_dir, &season_nfo)?;
+                    let outcome = shared.writer.write_season(target_dir, &season_nfo)?;
                     print_nfo_outcome(&outcome.path, outcome.action);
                     record_write_action(
                         outcome.action,
@@ -826,8 +844,9 @@ pub(crate) async fn run(args: &NfoArgs) -> Result<()> {
         match client.download_image(poster_path).await {
             Ok(bytes) => {
                 for target_dir in pending_dirs {
-                    let outcome =
-                        writer.write_season_primary_image(target_dir, extension, &bytes)?;
+                    let outcome = shared
+                        .writer
+                        .write_season_primary_image(target_dir, extension, &bytes)?;
                     print_nfo_outcome(&outcome.path, outcome.action);
                     record_write_action(
                         outcome.action,
@@ -837,7 +856,7 @@ pub(crate) async fn run(args: &NfoArgs) -> Result<()> {
                 }
             }
             Err(error) => {
-                println!("跳过第 {} 季海报下载失败: {error}", season);
+                println!("跳过第 {season} 季海报下载失败: {error}");
                 image_failures += pending_dirs.len();
             }
         }
@@ -856,18 +875,7 @@ pub(crate) async fn run(args: &NfoArgs) -> Result<()> {
         let episode = episode_lookup
             .get(&(season, parsed.episode_number))
             .cloned();
-        spawn_episode_export_job(
-            &mut episode_tasks,
-            &client,
-            writer,
-            force,
-            &args.language,
-            show_id,
-            &details.name,
-            video_path,
-            parsed,
-            episode,
-        );
+        spawn_episode_export_job(&mut episode_tasks, &shared, video_path, parsed, episode);
     }
 
     while let Some(result) = episode_tasks.join_next().await {
@@ -888,41 +896,30 @@ pub(crate) async fn run(args: &NfoArgs) -> Result<()> {
             let episode = episode_lookup
                 .get(&(season, parsed.episode_number))
                 .cloned();
-            spawn_episode_export_job(
-                &mut episode_tasks,
-                &client,
-                writer,
-                force,
-                &args.language,
-                show_id,
-                &details.name,
-                video_path,
-                parsed,
-                episode,
-            );
+            spawn_episode_export_job(&mut episode_tasks, &shared, video_path, parsed, episode);
         }
     }
 
     println!("\nNFO 导出摘要:");
-    println!("  NFO 计划/成功写入: {}", nfo_written);
+    println!("  NFO 计划/成功写入: {nfo_written}");
     if nfo_skipped_existing > 0 {
-        println!("  NFO 已跳过已有文件: {}", nfo_skipped_existing);
+        println!("  NFO 已跳过已有文件: {nfo_skipped_existing}");
     }
-    println!("  图片计划/成功写入: {}", image_written);
+    println!("  图片计划/成功写入: {image_written}");
     if image_skipped_existing > 0 {
-        println!("  图片已跳过已有文件: {}", image_skipped_existing);
+        println!("  图片已跳过已有文件: {image_skipped_existing}");
     }
     if missing_metadata > 0 {
-        println!("  缺少剧集元数据: {}", missing_metadata);
+        println!("  缺少剧集元数据: {missing_metadata}");
     }
     if missing_images > 0 {
-        println!("  缺少图片源数据: {}", missing_images);
+        println!("  缺少图片源数据: {missing_images}");
     }
     if image_failures > 0 {
-        println!("  图片下载失败: {}", image_failures);
+        println!("  图片下载失败: {image_failures}");
     }
     if metadata_enrichment_failures > 0 {
-        println!("  单集增强信息获取失败: {}", metadata_enrichment_failures);
+        println!("  单集增强信息获取失败: {metadata_enrichment_failures}");
     }
     if args.dry_run {
         println!("  当前为预览模式，未实际写入文件");

@@ -81,7 +81,7 @@ impl FileScanner {
 
                 let is_subtitle = SUBTITLE_EXTENSIONS
                     .iter()
-                    .any(|ext| suffix.ends_with(&format!(".{}", ext)));
+                    .any(|ext| suffix.ends_with(&format!(".{ext}")));
 
                 if is_subtitle {
                     subtitles.push(path);
@@ -103,7 +103,7 @@ impl FileScanner {
         let new_parent = new_video_path.parent()?;
 
         let suffix = subtitle_filename.strip_prefix(old_video_stem)?;
-        let new_subtitle_filename = format!("{}{}", new_video_stem, suffix);
+        let new_subtitle_filename = format!("{new_video_stem}{suffix}");
 
         Some(new_parent.join(new_subtitle_filename))
     }

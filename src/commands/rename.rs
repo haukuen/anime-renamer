@@ -282,27 +282,27 @@ fn execute_rename_operations(operations: &[RenameOperation]) -> Result<(usize, u
     let mut subtitle_success = 0;
 
     for (index, staged_rename) in staged.iter().enumerate() {
-        if let Some(parent_dir) = staged_rename.operation.target.parent() {
-            if let Err(error) = std::fs::create_dir_all(parent_dir) {
-                rollback_rename_operations(&staged, index, index).context(format!(
-                    "创建目录失败且回滚未完成: {} ({error})",
-                    parent_dir.display()
-                ))?;
-                bail!("创建目录失败，已回滚: {} ({error})", parent_dir.display());
-            }
+        if let Some(parent_dir) = staged_rename.operation.target.parent()
+            && let Err(error) = std::fs::create_dir_all(parent_dir)
+        {
+            rollback_rename_operations(&staged, index, index).context(format!(
+                "创建目录失败且回滚未完成: {} ({error})",
+                parent_dir.display()
+            ))?;
+            bail!("创建目录失败，已回滚: {} ({error})", parent_dir.display());
         }
 
-        if staged_rename.operation.target.exists() {
-            if let Err(error) = std::fs::remove_file(&staged_rename.operation.target) {
-                rollback_rename_operations(&staged, index, index).context(format!(
-                    "移除已存在目标失败且回滚未完成: {} ({error})",
-                    staged_rename.operation.target.display()
-                ))?;
-                bail!(
-                    "移除已存在目标失败，已回滚: {} ({error})",
-                    staged_rename.operation.target.display()
-                );
-            }
+        if staged_rename.operation.target.exists()
+            && let Err(error) = std::fs::remove_file(&staged_rename.operation.target)
+        {
+            rollback_rename_operations(&staged, index, index).context(format!(
+                "移除已存在目标失败且回滚未完成: {} ({error})",
+                staged_rename.operation.target.display()
+            ))?;
+            bail!(
+                "移除已存在目标失败，已回滚: {} ({error})",
+                staged_rename.operation.target.display()
+            );
         }
 
         if let Err(error) =
@@ -353,9 +353,9 @@ fn execute_rename(rename_map: &[RenameEntry], dry_run: bool) -> Result<()> {
 
     let (video_success, subtitle_success) = execute_rename_operations(&operations)?;
 
-    println!("\n成功重命名 {} 个视频文件", video_success);
+    println!("\n成功重命名 {video_success} 个视频文件");
     if subtitle_success > 0 {
-        println!("成功重命名 {} 个字幕文件", subtitle_success);
+        println!("成功重命名 {subtitle_success} 个字幕文件");
     }
 
     Ok(())
@@ -378,12 +378,12 @@ fn collect_rename_candidates(files: &[PathBuf], parser: &FileParser) -> Vec<Pars
             }
             parsed_files.push((file.clone(), parsed));
         } else {
-            println!("无法解析: {}", filename);
+            println!("无法解析: {filename}");
         }
     }
 
     if skipped_formatted > 0 {
-        println!("跳过 {} 个已规范化的文件\n", skipped_formatted);
+        println!("跳过 {skipped_formatted} 个已规范化的文件\n");
     }
 
     parsed_files
@@ -400,15 +400,12 @@ fn build_output_name(
     if keep_tags && !tags.is_empty() {
         let tags_str = tags
             .iter()
-            .map(|tag| format!("[{}]", tag))
+            .map(|tag| format!("[{tag}]"))
             .collect::<Vec<_>>()
             .join("");
-        format!(
-            "{} S{:02}E{:02}{}.{}",
-            show_name, season, episode, tags_str, extension
-        )
+        format!("{show_name} S{season:02}E{episode:02}{tags_str}.{extension}")
     } else {
-        format!("{} S{:02}E{:02}.{}", show_name, season, episode, extension)
+        format!("{show_name} S{season:02}E{episode:02}.{extension}")
     }
 }
 
@@ -416,7 +413,7 @@ fn season_folder_name(season: u32) -> String {
     if season == 0 {
         "Season 0".to_string()
     } else {
-        format!("Season {}", season)
+        format!("Season {season}")
     }
 }
 
@@ -544,7 +541,7 @@ fn build_tmdb_rename_map(
                     println!("跳过剧场版: {}", display_file_name(file_path));
                 } else {
                     let ep = apply_offset(parsed.episode_number, args.offset);
-                    println!("无法映射第 {} 集到任何季", ep);
+                    println!("无法映射第 {ep} 集到任何季");
                 }
                 continue;
             }
@@ -571,7 +568,7 @@ async fn rename_with_tmdb_id(
     parsed_files: &[ParsedEntry],
     tmdb_id: u32,
 ) -> Result<()> {
-    println!("使用 TMDB ID: {}", tmdb_id);
+    println!("使用 TMDB ID: {tmdb_id}");
     let client = TmdbClient::new();
 
     let details = client
@@ -621,7 +618,7 @@ async fn rename_with_anilist(
 pub(crate) async fn run(args: &RenameArgs) -> Result<()> {
     let path = args.path.as_str();
 
-    println!("扫描目录: {}", path);
+    println!("扫描目录: {path}");
 
     let scanner = FileScanner::new(args.recursive);
     let files = scanner.scan(path);
@@ -646,7 +643,7 @@ pub(crate) async fn run(args: &RenameArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| parsed_files[0].1.anime_name.clone());
 
-    println!("检测到番剧: {}", anime_name);
+    println!("检测到番剧: {anime_name}");
 
     if let Some(id) = args.tmdb_id.or_else(|| extract_tmdb_id(path)) {
         return rename_with_tmdb_id(args, &parsed_files, id).await;

@@ -396,7 +396,7 @@ fn push_people(xml: &mut String, tag: &str, people: &[PersonNfo], indent_level: 
         xml.push('<');
         xml.push_str(tag);
         if let Some(tmdb_id) = person.tmdb_id {
-            xml.push_str(&format!(r#" tmdbid="{}""#, tmdb_id));
+            xml.push_str(&format!(r#" tmdbid="{tmdb_id}""#));
         }
         xml.push('>');
         xml.push_str(&escape_xml(&person.name));

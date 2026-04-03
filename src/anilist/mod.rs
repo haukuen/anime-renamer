@@ -192,7 +192,7 @@ fn extract_graphql_data(response: GraphQLResponse) -> Result<Option<Data>> {
             .map(|error| error.message.as_str())
             .collect::<Vec<_>>()
             .join("；");
-        bail!("AniList GraphQL 错误: {}", message);
+        bail!("AniList GraphQL 错误: {message}");
     }
 
     Ok(response.data)
@@ -223,11 +223,11 @@ impl Media {
     pub fn format_date(&self) -> String {
         if let Some(ref date) = self.start_date {
             if let (Some(year), Some(month), Some(day)) = (date.year, date.month, date.day) {
-                return format!("{:04}-{:02}-{:02}", year, month, day);
+                return format!("{year:04}-{month:02}-{day:02}");
             } else if let (Some(year), Some(month)) = (date.year, date.month) {
-                return format!("{:04}-{:02}", year, month);
+                return format!("{year:04}-{month:02}");
             } else if let Some(year) = date.year {
-                return format!("{}", year);
+                return format!("{year}");
             }
         }
         "未知".to_string()
